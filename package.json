@@ -1,0 +1,26 @@
+{
+  "name": "gity",
+  "version": "0.1.0",
+  "description": "AI-powered git commit agent CLI",
+  "type": "module",
+  "bin": {
+    "gity": "./dist/gity.cjs"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx watch src/bin/gity.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/commander": "npm:@types/commander@*",
+    "tsup": "^8.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.2.0"
+  }
+}
