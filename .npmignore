@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Lock files (keep package-lock.json for reproducibility, ignore others)
+*.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Env files (never commit secrets)
+.env
+.env.*
+
+# Config (user-specific, not checked in)
+~/.config/gity/
+
+# Test artifacts
+coverage/
+
+PLAN.md
