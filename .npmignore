@@ -1,9 +1,9 @@
 # Dependencies
 node_modules/
-
+src/
 # Build output
 dist/
-
+.github/
 # Lock files (keep package-lock.json for reproducibility, ignore others)
 *.lock
 
