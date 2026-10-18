@@ -1,6 +1,7 @@
 {
   "name": "gity",
   "version": "0.1.1",
+  "author": "Breno <breno.arantes@proton.me>",
   "description": "AI-powered git commit agent CLI",
   "type": "module",
   "repository": {
@@ -13,6 +14,10 @@
   "homepage": "https://github.com/brenovit/gity#readme",
   "bin": {
     "gity": "./dist/gity.cjs"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsup",
