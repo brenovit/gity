@@ -1,6 +1,6 @@
 {
   "name": "gity",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": "Breno <breno.arantes@proton.me>",
   "description": "AI-powered git commit agent CLI",
   "type": "module",
