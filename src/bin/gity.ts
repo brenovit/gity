@@ -2,15 +2,15 @@ import { Command } from 'commander';
 import { findRepoRootAsync, getRepoStatusAsync } from '../util/repo.js';
 import { runSetup } from '../commands/setup.js';
 import {
-  providerList,
   providerAdd,
+  providerList,
   providerRemove,
-  providerUse,
-  providerTest,
   providerShow,
-  providerConfigShow,
-  providerConfigPath,
+  providerTest,
+  providerUse,
+  type ProviderAddOptions,
 } from '../commands/provider.js';
+import { configPath, configShow } from '../commands/config.js';
 
 const program = new Command();
 
@@ -45,70 +45,77 @@ program.action(async () => {
   }
 });
 
+/** Wrap an action so errors print as a single friendly line and exit 1. */
+function handle<A extends unknown[]>(fn: (...args: A) => Promise<void> | void): (...args: A) => Promise<void> {
+  return async (...args: A) => {
+    try {
+      await fn(...args);
+    } catch (error) {
+      console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    }
+  };
+}
+
 // gity setup — interactive provider setup wizard
 program
   .command('setup')
   .description('Run the interactive provider setup wizard')
-  .action(runSetup);
+  .action(handle(runSetup));
 
 // gity provider — provider management
-const providerCmd = program.command('provider');
-providerCmd.description('Manage provider profiles');
+const providerCmd = program.command('provider').description('Manage provider profiles');
 
 providerCmd
   .command('list')
+  .alias('ls')
   .description('List all configured provider profiles')
-  .action(providerList);
+  .action(handle(providerList));
 
 providerCmd
   .command('show <name>')
   .description('Show details for a specific provider')
-  .action(providerShow);
+  .action(handle(providerShow));
 
 providerCmd
-  .command('add <name> [type]')
-  .description('Add a new provider profile')
-  .option('--model <model>', 'Model name')
-  .option('--baseUrl <url>', 'Base URL')
-  .option('--apiKeyEnv <env>', 'Environment variable name for API key')
-  .action(async (name: string, typeStr?: string, opts?: { model?: string; baseUrl?: string; apiKeyEnv?: string }) => {
-    await providerAdd({
-      name,
-      type: typeStr ?? 'ollama',
-      model: opts?.model,
-      baseUrl: opts?.baseUrl,
-      apiKeyEnv: opts?.apiKeyEnv,
-    });
-  });
+  .command('add <name>')
+  .description('Add a provider profile')
+  .requiredOption('-t, --type <type>', 'provider type: ollama | lmstudio | claude | gemini')
+  .requiredOption('-m, --model <model>', 'model name')
+  .option('--base-url <url>', 'base URL (defaults per provider type)')
+  .option('--api-key-env <name>', 'env var holding the API key (claude/gemini)')
+  .option('--default', 'make this the default provider')
+  .option('-f, --force', 'overwrite an existing profile with the same name')
+  .action(handle((name: string, opts: ProviderAddOptions) => providerAdd(name, opts)));
 
 providerCmd
   .command('remove <name>')
+  .alias('rm')
   .description('Remove a provider profile')
-  .action(providerRemove);
+  .action(handle(providerRemove));
 
 providerCmd
   .command('use <name>')
-  .description('Set a provider as the default')
-  .action(providerUse);
+  .description('Set the default provider')
+  .action(handle(providerUse));
 
 providerCmd
   .command('test [name]')
-  .description('Test a provider connection')
-  .action(providerTest);
+  .description('Check connectivity/auth for a provider (default provider if omitted)')
+  .action(handle(providerTest));
 
-// gity config — config management
-const configCmd = program.command('config');
-configCmd.description('Manage gity configuration');
+// gity config — config inspection
+const configCmd = program.command('config').description('Inspect gity configuration');
 
 configCmd
   .command('show')
   .description('Show current config (secrets masked)')
-  .action(providerConfigShow);
+  .action(handle(configShow));
 
 configCmd
   .command('path')
   .description('Print the config file path')
-  .action(providerConfigPath);
+  .action(handle(configPath));
 
 (async () => {
   await program.parseAsync(process.argv);

@@ -1,150 +1,155 @@
-import * as prompts from '@clack/prompts';
-import { cancel, log } from '@clack/prompts';
-import type { ProviderProfile, ProviderType } from '../config.js';
+import * as p from '@clack/prompts';
+import { z } from 'zod';
 import {
-  loadConfig,
-  saveConfig,
+  addProvider,
+  buildProfile,
+  getApiKey,
   getConfigPath,
-  validateProviderProfile,
-  getProviderApiKey,
-  hasApiKey,
+  loadConfig,
+  PROVIDER_DEFAULTS,
+  ProviderNameSchema,
   ProviderTypeSchema,
+  saveConfig,
+  type ProviderProfile,
+  type ProviderType,
 } from '../config.js';
+import { testConnection } from '../providers/connection.js';
+
+const MANUAL_MODEL = '__manual__';
+
+/** Exit cleanly when the user presses Ctrl+C / Esc. */
+function unwrap<T>(value: T): Exclude<T, symbol> {
+  if (p.isCancel(value)) {
+    p.cancel('Setup cancelled.');
+    process.exit(0);
+  }
+  return value as Exclude<T, symbol>;
+}
+
+/** Adapt a zod schema to a clack `validate` callback. */
+function validateWith(schema: z.ZodType) {
+  return (value: string | undefined): string | undefined => {
+    const result = schema.safeParse((value ?? '').trim());
+    return result.success ? undefined : result.error.issues[0]?.message;
+  };
+}
 
 export async function runSetup(): Promise<void> {
-  const config = await loadConfig();
+  let config = await loadConfig();
+  p.intro('gity setup');
 
-  prompts.intro('gity setup');
+  const type: ProviderType = unwrap(
+    await p.select({
+      message: 'Which LLM provider do you want to use?',
+      options: ProviderTypeSchema.options.map((t) => ({ value: t, label: PROVIDER_DEFAULTS[t].label })),
+    }),
+  );
+  const defaults: { baseUrl: string; modelHint: string; apiKeyEnv?: string } = PROVIDER_DEFAULTS[type];
 
-  // 1. Choose provider type
-  const typeChoice = await prompts.select({
-    message: 'Choose a provider:',
-    options: [
-      { value: 'ollama', label: 'Ollama (local)' },
-      { value: 'lmstudio', label: 'LM Studio (local)' },
-      { value: 'claude', label: 'Claude API (Anthropic)' },
-      { value: 'gemini', label: 'Gemini API (Google)' },
-    ],
-  });
+  const name = unwrap(
+    await p.text({
+      message: 'Profile name',
+      initialValue: type,
+      validate: validateWith(ProviderNameSchema),
+    }),
+  ).trim();
 
-  if (prompts.isCancel(typeChoice)) {
-    cancel('Setup cancelled.');
-    process.exit(0);
+  if (name in config.providers) {
+    const overwrite = unwrap(await p.confirm({ message: `Profile "${name}" exists. Overwrite it?`, initialValue: false }));
+    if (!overwrite) {
+      p.cancel('Nothing changed.');
+      return;
+    }
   }
 
-  const type = typeChoice as ProviderType;
+  const baseUrl = unwrap(
+    await p.text({
+      message: 'Base URL',
+      initialValue: defaults.baseUrl,
+      validate: validateWith(z.url({ protocol: /^https?$/, error: 'must be an http(s) URL' })),
+    }),
+  ).trim();
 
-  // 2. Provider name (key in the config)
-  const name = (await prompts.text({
-    message: 'Provider name (used to reference this profile):',
-    placeholder: `${type}-default`,
-    initialValue: `${type}-default`,
-  })) as string;
-
-  if (prompts.isCancel(name)) {
-    cancel('Setup cancelled.');
-    process.exit(0);
-  }
-
-  // 3. Model name
-  const model = (await prompts.text({
-    message: 'Model name:',
-    placeholder: type === 'ollama' ? 'llama3.2' : type === 'claude' ? 'claude-sonnet-4-20250514' : 'gemini-2.0-flash',
-  })) as string;
-
-  if (prompts.isCancel(model)) {
-    cancel('Setup cancelled.');
-    process.exit(0);
-  }
-
-  // 4. Base URL (with defaults per provider)
-  const defaultUrls: Record<ProviderType, string> = {
-    ollama: 'http://localhost:11434',
-    lmstudio: 'http://localhost:1234/v1',
-    claude: 'https://api.anthropic.com',
-    gemini: 'https://generativelanguage.googleapis.com/v1beta',
-  };
-
-  const baseUrl = (await prompts.text({
-    message: 'Base URL:',
-    placeholder: defaultUrls[type],
-    initialValue: defaultUrls[type],
-  })) as string;
-
-  if (prompts.isCancel(baseUrl)) {
-    cancel('Setup cancelled.');
-    process.exit(0);
-  }
-
-  // 5. API key from env (we only store the env var name, not the key)
   let apiKeyEnv: string | undefined;
-  if (type === 'claude') {
-    apiKeyEnv = 'ANTHROPIC_API_KEY';
-  } else if (type === 'gemini') {
-    apiKeyEnv = 'GEMINI_API_KEY';
+  if (defaults.apiKeyEnv) {
+    apiKeyEnv = unwrap(
+      await p.text({
+        message: 'Environment variable holding the API key (the key itself is never stored)',
+        initialValue: defaults.apiKeyEnv,
+        validate: validateWith(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'invalid environment variable name')),
+      }),
+    ).trim();
   }
 
-  // Check if env var is already set
-  const existingKey = apiKeyEnv ? process.env[apiKeyEnv] : null;
-  if (existingKey && existingKey.length > 0) {
-    log.info(`Env var ${apiKeyEnv} is already set.`);
-  } else if (apiKeyEnv) {
-    const confirmSet = await prompts.confirm({
-      message: `Set ${apiKeyEnv} in your shell profile (e.g. ~/.zshrc) and restart your terminal?`,
-      initialValue: true,
-    });
-    if (prompts.isCancel(confirmSet)) {
-      cancel('Setup cancelled.');
-      process.exit(0);
+  // Probe the provider with a provisional model so we can offer its model list.
+  const probe = buildProfile({ type, baseUrl, apiKeyEnv, model: defaults.modelHint });
+  if (apiKeyEnv && !getApiKey(probe)) {
+    p.log.warn(`${apiKeyEnv} is not set. Add \`export ${apiKeyEnv}=...\` to ~/.zshrc and open a new terminal.`);
+  }
+
+  const spin = p.spinner();
+  spin.start(`Connecting to ${baseUrl}`);
+  const result = await testConnection(probe);
+  if (result.ok) spin.stop(`Connected in ${result.latencyMs}ms`);
+  else spin.error(`Connection failed: ${result.error ?? 'unknown error'}`);
+
+  const model = await askModel(result.ok ? result.models : [], defaults.modelHint);
+  const profile: ProviderProfile = buildProfile({ type, baseUrl, apiKeyEnv, model });
+
+  if (!result.ok) {
+    const saveAnyway = unwrap(await p.confirm({ message: 'Save this profile anyway?', initialValue: true }));
+    if (!saveAnyway) {
+      p.cancel('Nothing saved.');
+      return;
     }
   }
 
-  // Build the provider profile using the discriminated union
-  const profile: ProviderProfile = {
-    type,
-    model: model.trim(),
-    baseUrl: baseUrl.trim(),
-  } as ProviderProfile;
-
-  // Add apiKeyEnv for cloud providers
-  if (type === 'claude' || type === 'gemini') {
-    (profile as { apiKeyEnv?: string }).apiKeyEnv = apiKeyEnv;
+  let makeDefault = !config.defaultProvider || config.defaultProvider === name;
+  if (!makeDefault) {
+    makeDefault = unwrap(
+      await p.confirm({
+        message: `Make "${name}" the default provider (currently "${config.defaultProvider}")?`,
+        initialValue: true,
+      }),
+    );
   }
 
-  // Validate the profile
-  const validation = validateProviderProfile(profile);
-  if (!validation.valid) {
-    console.error('Validation errors:');
-    for (const err of validation.errors) {
-      console.error(`  - ${err}`);
-    }
-    console.error('\nNote: API key errors are expected if the env var is not set.');
-    console.error('You can set it later and re-test with `gity provider test ${name}`.');
-  }
-
-  // 6. Save to config
-  config.providers[name] = profile;
-
-  // Set as default if no default exists yet
-  if (!config.defaultProvider) {
-    config.defaultProvider = name;
-  }
-
+  config = addProvider(config, name, profile, { makeDefault, overwrite: true });
   await saveConfig(config);
 
-  const configPath = getConfigPath();
-  console.log();
-  log.success(`Provider "${name}" saved to ${configPath}`);
-  console.log(`  Type:    ${profile.type}`);
-  console.log(`  Model:   ${profile.model}`);
-  console.log(`  URL:     ${profile.baseUrl}`);
-  if (hasApiKey(profile)) {
-    console.log(`  API key: (found in env)`);
-  } else {
-    const envVar = 'apiKeyEnv' in profile ? (profile as { apiKeyEnv?: string }).apiKeyEnv : 'N/A';
-    console.log(`  API key: (env var ${envVar} not set — will fail until set)`);
+  p.note(
+    [
+      `type:     ${profile.type}`,
+      `model:    ${profile.model}`,
+      `base URL: ${profile.baseUrl}`,
+      ...(apiKeyEnv ? [`api key:  $${apiKeyEnv}`] : []),
+      `default:  ${config.defaultProvider === name ? 'yes' : 'no'}`,
+    ].join('\n'),
+    `Saved "${name}" to ${getConfigPath()}`,
+  );
+  p.outro('Done! Run `gity provider test` any time to re-check the connection.');
+}
+
+async function askModel(available: string[], hint: string): Promise<string> {
+  if (available.length > 0) {
+    const choice = unwrap(
+      await p.select({
+        message: 'Model',
+        options: [
+          ...available.map((m) => ({ value: m, label: m })),
+          { value: MANUAL_MODEL, label: 'Enter a model name manually…' },
+        ],
+        maxItems: 12,
+      }),
+    );
+    if (choice !== MANUAL_MODEL) return choice;
   }
-  console.log(`  Default:  ${config.defaultProvider === name ? 'yes' : 'no'}`);
-  console.log();
-  prompts.outro('Run `gity provider test` to verify your setup.');
+  return unwrap(
+    await p.text({
+      message: 'Model name',
+      placeholder: hint,
+      defaultValue: hint,
+      validate: (v) => (v !== undefined && v.length > 0 && v.trim() === '' ? 'model is required' : undefined),
+    }),
+  ).trim();
 }

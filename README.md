@@ -73,7 +73,8 @@ Shows what commits would be created without touching git.
 | `gity --help` | Show help |
 | `gity setup` | Interactive provider setup wizard |
 | `gity provider list` | List configured providers |
-| `gity provider add <name> [options]` | Add a provider profile |
+| `gity provider add <name> -t <type> -m <model>` | Add a profile (`--base-url`, `--api-key-env`, `--default`, `--force`) |
+| `gity provider show <name>` | Show a provider profile |
 | `gity provider remove <name>` | Remove a provider profile |
 | `gity provider use <name>` | Set default provider |
 | `gity provider test [name]` | Test a provider connection |
@@ -88,7 +89,8 @@ Shows what commits would be created without touching git.
 
 ## Configuration
 
-Config is stored at `~/.config/gity/config.json` (created with `0600` permissions).
+Config is stored at `~/.config/gity/config.json` (file `0600`, directory `0700`).
+Override with `$GITY_CONFIG` or `$XDG_CONFIG_HOME`. An invalid config file is reported as an error, never silently reset.
 
 API keys come from environment variables:
 

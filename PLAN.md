@@ -103,7 +103,7 @@ interface Provider {
 - `gity --version`, `gity --help`
 - `gity` outside a git repo prints a friendly error and exits 1
 
-### Stage 2: Config + provider management (no agent yet)
+### Stage 2: Config + provider management (no agent yet) ✅
 - Zod config schema with defaults; `Config` type inferred from it
 - `gity setup`: interactive wizard (choose provider, base URL/model/API key env var, test connection)
 - `gity provider list | add | remove | use <name> | test [name]`
