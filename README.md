@@ -77,7 +77,7 @@ Shows what commits would be created without touching git.
 | `gity provider show <name>` | Show a provider profile |
 | `gity provider remove <name>` | Remove a provider profile |
 | `gity provider use <name>` | Set default provider |
-| `gity provider test [name]` | Test a provider connection |
+| `gity provider test [name]` | Test provider connectivity and chat reply latency |
 | `gity config show` | Show config (secrets masked) |
 | `gity config path` | Print config file path |
 | `gity run [options]` | Run the commit agent |

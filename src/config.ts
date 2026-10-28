@@ -73,6 +73,11 @@ export const ProviderProfileSchema = z.discriminatedUnion('type', [
   ClaudeProfileSchema,
   GeminiProfileSchema,
 ]);
+export type OllamaProfile = z.infer<typeof OllamaProfileSchema>;
+export type LmStudioProfile = z.infer<typeof LmStudioProfileSchema>;
+export type ClaudeProfile = z.infer<typeof ClaudeProfileSchema>;
+export type GeminiProfile = z.infer<typeof GeminiProfileSchema>;
+
 export type ProviderProfile = z.infer<typeof ProviderProfileSchema>;
 export type ProviderProfileInput = z.input<typeof ProviderProfileSchema>;
 

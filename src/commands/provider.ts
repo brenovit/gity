@@ -12,6 +12,7 @@ import {
   type ProviderProfile,
 } from '../config.js';
 import { testConnection, type ConnectionResult } from '../providers/connection.js';
+import { createProvider } from '../providers/index.js';
 
 function printTable(rows: string[][]): void {
   const widths = rows[0]?.map((_, col) => Math.max(...rows.map((r) => (r[col] ?? '').length))) ?? [];
@@ -84,7 +85,27 @@ export async function providerTest(name?: string): Promise<void> {
   console.log(`Testing "${target}" (${profile.type} @ ${profile.baseUrl})...`);
   const result = await testConnection(profile);
   printConnectionResult(profile, result).forEach((line) => console.log(`  ${line}`));
-  if (!result.ok) process.exitCode = 1;
+  if (!result.ok) {
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log(`Testing chat (${profile.model})...`);
+  const started = performance.now();
+  try {
+    const provider = createProvider(profile);
+    const res = await provider.chat({
+      messages: [{ role: 'user', content: 'Respond with "pong".' }],
+    });
+    const latencyMs = Math.round(performance.now() - started);
+    const reply = res.text.trim();
+    console.log(`  ✓ Chat reply in ${latencyMs}ms: ${reply}`);
+  } catch (err) {
+    const latencyMs = Math.round(performance.now() - started);
+    const message = err instanceof Error ? err.message : String(err);
+    console.log(`  ✗ Chat failed in ${latencyMs}ms: ${message}`);
+    process.exitCode = 1;
+  }
 }
 
 /** Format a connection result as display lines (shared with `gity setup`). */

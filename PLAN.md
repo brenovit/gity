@@ -111,7 +111,7 @@ interface Provider {
 - Support multiple named provider profiles with one marked as default
 - Defaults: Ollama `http://localhost:11434`, LM Studio `http://localhost:1234/v1`
 
-### Stage 3: Provider adapters (plain chat only)
+### Stage 3: Provider adapters (plain chat only) ✅
 - Implement all four adapters behind the `Provider` interface, non-streaming first
 - Validate raw provider responses with zod (or narrow from `unknown`), no unchecked casts
 - `gity provider test` sends a tiny prompt and prints the reply plus latency
