@@ -117,7 +117,7 @@ interface Provider {
 - `gity provider test` sends a tiny prompt and prints the reply plus latency
 - Tool-call smoke test per adapter (fake `get_time` tool)
 
-### Stage 4: Tools
+### Stage 4: Tools ✅
 - Implement `git.ts`, `grep.ts`, `bash.ts` tools with zod schemas and safety rules
 - Tools return structured, size-limited results
 - `gity tools:debug <tool> '<json args>'` (hidden dev command)

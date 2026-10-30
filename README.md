@@ -132,6 +132,21 @@ API keys come from environment variables:
 - Secrets (`.env*`, `*.pem`, `*.key`, `id_rsa*`) are never staged
 - Agent iterations capped at 15 (configurable)
 
+## Agent Tools
+
+The agent can call these tools (all run in the repo root, output capped at 20k chars):
+
+| Tool | Kind | Description |
+|---|---|---|
+| `git_status` | read | Porcelain status; secret files flagged |
+| `git_diff` | read | Unified diff (`staged`, `paths`, `stat`, `context`); secrets excluded |
+| `git_log` | read | Recent commits (`limit`, `paths`) |
+| `grep` | read | `git grep` over tracked + untracked files; secrets excluded |
+| `bash` | read | `ls`, `cat`, `head`, `tail`, `wc`, `file`, `pwd`, `tree` only |
+| `git_add` | mutating | Stage explicit files (no dirs, `.`, globs or secrets) |
+| `git_commit` | mutating | Commit staged changes; refuses if a secret is staged |
+| `git_pull` | mutating | `git pull --rebase --autostash` |
+
 ## Development
 
 ```bash
@@ -140,6 +155,15 @@ npm run build        # Bundle to dist/gity.cjs
 npm run dev          # Watch mode with tsx
 npm run typecheck    # TypeScript type check
 npm test             # Run vitest tests
+```
+
+Hidden dev command to invoke tools directly:
+
+```bash
+gity tools:debug                                   # list tools
+gity tools:debug git_diff --schema                 # print JSON Schema
+gity tools:debug git_log '{"limit":3}'             # run a tool
+gity tools:debug bash '{"command":"ls src"}' --json
 ```
 
 ## License

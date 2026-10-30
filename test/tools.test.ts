@@ -1,0 +1,272 @@
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { checkCommand, tokenize } from '../src/tools/bash.js';
+import { runTool, toToolSpecs } from '../src/tools/index.js';
+import { isInside, isSecretPath, resolveRepoPath, truncate } from '../src/tools/safety.js';
+import type { ToolContext } from '../src/tools/tool.js';
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: 'pipe' });
+}
+
+let base: string;
+let repo: string;
+let outside: string;
+let ctx: ToolContext;
+
+beforeEach(() => {
+  base = realpathSync(mkdtempSync(join(tmpdir(), 'gity-tools-')));
+  repo = join(base, 'repo');
+  outside = join(base, 'outside');
+  mkdirSync(repo);
+  mkdirSync(outside);
+  writeFileSync(join(outside, 'secret.txt'), 'top secret\n');
+  git(repo, 'init', '-q');
+  git(repo, 'config', 'user.email', 'test@test.com');
+  git(repo, 'config', 'user.name', 'Test');
+  git(repo, 'config', 'commit.gpgsign', 'false');
+  writeFileSync(join(repo, 'README.md'), '# Hello\n');
+  git(repo, 'add', 'README.md');
+  git(repo, 'commit', '-q', '-m', 'initial');
+  ctx = { repoRoot: repo };
+});
+
+afterEach(() => {
+  rmSync(base, { recursive: true, force: true });
+});
+
+describe('safety: truncate', () => {
+  it('leaves short text alone', () => {
+    expect(truncate('abc', 10)).toEqual({ text: 'abc', truncated: false });
+  });
+  it('cuts long text and appends a marker', () => {
+    const r = truncate('x'.repeat(50), 10);
+    expect(r.truncated).toBe(true);
+    expect(r.text.startsWith('x'.repeat(10))).toBe(true);
+    expect(r.text).toContain('[truncated: 40 more chars]');
+  });
+});
+
+describe('safety: path containment', () => {
+  it('isInside handles siblings with a common prefix', () => {
+    expect(isInside('/a/repo', '/a/repo/src')).toBe(true);
+    expect(isInside('/a/repo', '/a/repo')).toBe(true);
+    expect(isInside('/a/repo', '/a/repo-other')).toBe(false);
+    expect(isInside('/a/repo', '/a')).toBe(false);
+  });
+
+  it('accepts paths inside the repo, including non-existent ones', async () => {
+    expect((await resolveRepoPath(repo, 'README.md')).rel).toBe('README.md');
+    expect((await resolveRepoPath(repo, 'src/new/file.ts')).rel).toBe('src/new/file.ts');
+    expect((await resolveRepoPath(repo, '.')).rel).toBe('.');
+  });
+
+  it('rejects ../ escapes and absolute paths outside the repo', async () => {
+    await expect(resolveRepoPath(repo, '../outside/secret.txt')).rejects.toThrow(/escapes/);
+    await expect(resolveRepoPath(repo, join(outside, 'secret.txt'))).rejects.toThrow(/escapes/);
+    await expect(resolveRepoPath(repo, '/etc/passwd')).rejects.toThrow(/escapes/);
+  });
+
+  it('rejects symlinks (file and directory) that point outside the repo', async () => {
+    symlinkSync(join(outside, 'secret.txt'), join(repo, 'link.txt'));
+    symlinkSync(outside, join(repo, 'linkdir'));
+    await expect(resolveRepoPath(repo, 'link.txt')).rejects.toThrow(/symlink/);
+    await expect(resolveRepoPath(repo, 'linkdir/secret.txt')).rejects.toThrow(/symlink/);
+    await expect(resolveRepoPath(repo, 'linkdir/missing/deeper.txt')).rejects.toThrow(/symlink/);
+  });
+
+  it('allows symlinks that stay inside the repo', async () => {
+    symlinkSync(join(repo, 'README.md'), join(repo, 'readme-link'));
+    expect((await resolveRepoPath(repo, 'readme-link')).rel).toBe('README.md');
+  });
+});
+
+describe('safety: secret files', () => {
+  it.each(['.env', '.env.local', 'config/.env.production', 'cert.pem', 'server.key', 'id_rsa', 'id_rsa.pub', '.ssh/id_ed25519', 'store.p12'])(
+    'flags %s',
+    (p) => expect(isSecretPath(p)).toBe(true),
+  );
+  it.each(['README.md', 'src/env.ts', 'keyboard.ts', 'docs/pem-format.md'])('does not flag %s', (p) =>
+    expect(isSecretPath(p)).toBe(false),
+  );
+});
+
+describe('bash: tokenizer and forbidden commands', () => {
+  it('splits words and honours quotes/escapes', () => {
+    expect(tokenize(`cat 'app/(auth)/page.tsx' "a b" c\\ d`)).toEqual(['cat', 'app/(auth)/page.tsx', 'a b', 'c d']);
+  });
+
+  it.each([
+    ['ls | wc -l', /Pipes/],
+    ['cat README.md > out.txt', /Redirects/],
+    ['cat < README.md', /Redirects/],
+    ['ls; rm -rf .', /chaining/],
+    ['ls && rm x', /chaining/],
+    ['ls &', /chaining/],
+    ['cat $(echo x)', /not allowed/],
+    ['cat `echo x`', /Subshells/],
+    ['cat "$(echo x)"', /Subshells/],
+    ['echo $HOME', /expansion/],
+    ['ls\nrm x', /Multi-line/],
+    ["cat 'unterminated", /Unterminated/],
+  ])('rejects %j', (cmd, re) => {
+    expect(() => tokenize(cmd)).toThrow(re);
+  });
+
+  it.each(['rm -rf .', 'git push', 'sh -c ls', 'node -e 1', 'curl http://x', 'find . -delete', 'echo hi'])(
+    'rejects non-allowlisted command %j',
+    async (cmd) => {
+      await expect(checkCommand(cmd, repo)).rejects.toThrow(/not allowed/);
+    },
+  );
+
+  it.each(['tail -f README.md', 'tree -o out.txt', 'tree -R', 'file -C', 'wc --files0-from=list', 'ls --color'])(
+    'rejects dangerous option in %j',
+    async (cmd) => {
+      await expect(checkCommand(cmd, repo)).rejects.toThrow(/not allowed/);
+    },
+  );
+
+  it('rejects paths escaping the repo and secret files', async () => {
+    writeFileSync(join(repo, '.env'), 'TOKEN=abc\n');
+    symlinkSync(join(outside, 'secret.txt'), join(repo, 'link.txt'));
+    await expect(checkCommand('cat ../outside/secret.txt', repo)).rejects.toThrow(/escapes/);
+    await expect(checkCommand('cat /etc/passwd', repo)).rejects.toThrow(/escapes/);
+    await expect(checkCommand('cat link.txt', repo)).rejects.toThrow(/symlink/);
+    await expect(checkCommand('cat .env', repo)).rejects.toThrow(/secret/);
+  });
+
+  it('runs allowed read-only commands', async () => {
+    const r = await runTool('bash', { command: 'head -n 1 README.md' }, ctx);
+    expect(r).toMatchObject({ ok: true, output: '# Hello' });
+    const pwd = await runTool('bash', { command: 'pwd' }, ctx);
+    expect(pwd.output).toBe(repo);
+  });
+
+  it('returns blocked results instead of throwing', async () => {
+    const r = await runTool('bash', { command: 'cat ../outside/secret.txt' }, ctx);
+    expect(r.ok).toBe(false);
+    expect(r.output).toMatch(/^Blocked:/);
+    expect(r.output).not.toContain('top secret');
+  });
+});
+
+describe('git tools', () => {
+  it('git_status flags secret files', async () => {
+    writeFileSync(join(repo, '.env'), 'TOKEN=abc\n');
+    writeFileSync(join(repo, 'a.ts'), 'export {}\n');
+    const r = await runTool('git_status', {}, ctx);
+    expect(r.ok).toBe(true);
+    expect(r.output).toMatch(/\?\? \.env {2}\[secret: never stage\]/);
+    expect(r.output).toMatch(/\?\? a\.ts$/m);
+  });
+
+  it('git_diff shows changes, excludes secrets, and truncates large output', async () => {
+    writeFileSync(join(repo, 'README.md'), `# Hello\n${'line\n'.repeat(5000)}`);
+    writeFileSync(join(repo, 'id_rsa'), 'PRIVATE\n');
+    git(repo, 'add', '-f', 'id_rsa');
+    const r = await runTool('git_diff', {}, { repoRoot: repo, maxOutputChars: 500 });
+    expect(r.ok).toBe(true);
+    expect(r.truncated).toBe(true);
+    expect(r.output).toContain('[truncated:');
+    const staged = await runTool('git_diff', { staged: true }, ctx);
+    expect(staged.output).not.toContain('PRIVATE');
+  });
+
+  it('git_diff rejects secret and escaping paths', async () => {
+    expect((await runTool('git_diff', { paths: ['.env'] }, ctx)).output).toMatch(/Blocked: .*secret/);
+    expect((await runTool('git_diff', { paths: ['../outside'] }, ctx)).output).toMatch(/Blocked: .*escapes/);
+  });
+
+  it('git_add refuses secrets, directories, the repo root, escapes and pathspec magic', async () => {
+    writeFileSync(join(repo, '.env.local'), 'X=1\n');
+    writeFileSync(join(repo, 'key.pem'), 'k\n');
+    mkdirSync(join(repo, 'src'));
+    writeFileSync(join(repo, 'src', 'a.ts'), 'a\n');
+    for (const paths of [['.env.local'], ['key.pem'], ['src'], ['.'], ['../outside/secret.txt'], [':(glob)**']]) {
+      const r = await runTool('git_add', { paths }, ctx);
+      expect(r.ok, JSON.stringify(paths)).toBe(false);
+      expect(r.output).toMatch(/^Blocked:/);
+    }
+    expect(git(repo, 'diff', '--cached', '--name-only')).toBe('');
+  });
+
+  it('git_add + git_commit + git_log happy path', async () => {
+    mkdirSync(join(repo, 'src'));
+    writeFileSync(join(repo, 'src', 'a.ts'), 'a\n');
+    const add = await runTool('git_add', { paths: ['src/a.ts'] }, ctx);
+    expect(add.ok).toBe(true);
+    expect(add.output).toContain('src/a.ts');
+
+    const commit = await runTool('git_commit', { message: 'feat: add a' }, ctx);
+    expect(commit).toMatchObject({ ok: true });
+    expect(commit.output).toMatch(/feat: add a/);
+
+    const log = await runTool('git_log', { limit: 5 }, ctx);
+    expect(log.output.split('\n')).toHaveLength(2);
+    expect(log.output).toContain('feat: add a');
+  });
+
+  it('git_commit fails when nothing is staged and refuses staged secrets', async () => {
+    expect((await runTool('git_commit', { message: 'chore: nothing' }, ctx)).output).toMatch(/Nothing is staged/);
+    writeFileSync(join(repo, 'server.key'), 'k\n');
+    git(repo, 'add', 'server.key');
+    const r = await runTool('git_commit', { message: 'chore: oops' }, ctx);
+    expect(r.ok).toBe(false);
+    expect(r.output).toMatch(/Blocked: Secret files are staged/);
+  });
+
+  it('git_add stages deletions of tracked files', async () => {
+    rmSync(join(repo, 'README.md'));
+    const r = await runTool('git_add', { paths: ['README.md'] }, ctx);
+    expect(r.ok).toBe(true);
+    expect(r.output).toMatch(/D\s+README\.md/);
+  });
+});
+
+describe('grep tool', () => {
+  it('finds matches, includes untracked files, skips secrets', async () => {
+    writeFileSync(join(repo, 'notes.txt'), 'needle here\n');
+    writeFileSync(join(repo, '.env'), 'needle=secret\n');
+    const r = await runTool('grep', { pattern: 'needle' }, ctx);
+    expect(r.ok).toBe(true);
+    expect(r.output).toContain('notes.txt:1:needle here');
+    expect(r.output).not.toContain('secret');
+  });
+
+  it('reports no matches and caps results', async () => {
+    expect((await runTool('grep', { pattern: 'nope-not-here' }, ctx)).output).toBe('(no matches)');
+    writeFileSync(join(repo, 'many.txt'), 'hit\n'.repeat(20));
+    const r = await runTool('grep', { pattern: 'hit', fixedStrings: true, maxResults: 5 }, ctx);
+    expect(r.output.split('\n')).toHaveLength(6);
+    expect(r.output).toContain('[15 more matches not shown]');
+  });
+
+  it('rejects escaping and secret search paths', async () => {
+    expect((await runTool('grep', { pattern: 'x', path: '../outside' }, ctx)).output).toMatch(/Blocked/);
+    expect((await runTool('grep', { pattern: 'x', path: '.env' }, ctx)).output).toMatch(/Blocked/);
+  });
+});
+
+describe('registry', () => {
+  it('validates args with zod and reports unknown tools', async () => {
+    const bad = await runTool('git_add', { paths: [] }, ctx);
+    expect(bad.ok).toBe(false);
+    expect(bad.output).toMatch(/Invalid arguments for git_add/);
+    const unknown = await runTool('rm_rf', {}, ctx);
+    expect(unknown).toMatchObject({ ok: false });
+    expect(unknown.output).toMatch(/Unknown tool/);
+  });
+
+  it('exposes object JSON Schemas without $schema', () => {
+    const specs = toToolSpecs();
+    expect(specs.map((s) => s.name)).toEqual(['git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_pull', 'grep', 'bash']);
+    for (const s of specs) {
+      expect(s.parameters.type).toBe('object');
+      expect(s.parameters).not.toHaveProperty('$schema');
+    }
+  });
+});

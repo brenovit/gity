@@ -11,6 +11,7 @@ import {
   type ProviderAddOptions,
 } from '../commands/provider.js';
 import { configPath, configShow } from '../commands/config.js';
+import { toolsDebug, type ToolsDebugOptions } from '../commands/tools.js';
 
 const program = new Command();
 
@@ -116,6 +117,16 @@ configCmd
   .command('path')
   .description('Print the config file path')
   .action(handle(configPath));
+
+// gity tools:debug — hidden dev command to invoke a tool directly
+program
+  .command('tools:debug [tool] [json]', { hidden: true })
+  .description('Run a tool directly with JSON args (lists tools when no name is given)')
+  .option('--json', 'print the raw structured result')
+  .option('--schema', "print the tool's JSON Schema instead of running it")
+  .action(
+    handle((tool: string | undefined, json: string | undefined, opts: ToolsDebugOptions) => toolsDebug(tool, json, opts)),
+  );
 
 (async () => {
   await program.parseAsync(process.argv);
