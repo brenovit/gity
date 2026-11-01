@@ -59,16 +59,19 @@ The agent inspects your changes, groups them, and asks for confirmation before c
 ### 4. Dry-run (no changes)
 
 ```bash
+gity --dry-run
+# or
 gity run --dry-run
 ```
 
-Shows what commits would be created without touching git.
+Shows what commits would be created (grouped files and Conventional Commit messages) using read-only tools without touching git.
 
 ## Commands
 
 | Command | Description |
 |---|---|
 | `gity` | Show repo status (default action) |
+| `gity --dry-run` | Analyze changes and print a commit plan without touching git |
 | `gity --version` | Print version |
 | `gity --help` | Show help |
 | `gity setup` | Interactive provider setup wizard |
@@ -86,6 +89,8 @@ Shows what commits would be created without touching git.
 | `gity run --no-pull` | Skip pulling after commits |
 | `gity run --provider <name>` | Override provider for this run |
 | `gity run --model <name>` | Override model for this run |
+| `gity run --max-iterations <n>` | Cap agent tool-calling turns (default 15) |
+| `gity run -v, --verbose` | Show tool call timing and status |
 
 ## Configuration
 

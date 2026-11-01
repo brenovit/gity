@@ -123,7 +123,7 @@ interface Provider {
 - `gity tools:debug <tool> '<json args>'` (hidden dev command)
 - Vitest unit tests for safety guards (path escape, symlink escape, forbidden commands, secret files)
 
-### Stage 5: Agent loop, read-only analysis
+### Stage 5: Agent loop, read-only analysis ✅
 - Implement the loop and system prompt. Agent uses only read tools (status, diff, grep, log, bash)
 - `gity --dry-run` makes the agent analyze changes and print a commit plan (groups of files, proposed messages) without touching git
 

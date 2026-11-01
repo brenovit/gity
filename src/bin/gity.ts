@@ -11,6 +11,7 @@ import {
   type ProviderAddOptions,
 } from '../commands/provider.js';
 import { configPath, configShow } from '../commands/config.js';
+import { runAgent, type RunOptions } from '../commands/run.js';
 import { toolsDebug, type ToolsDebugOptions } from '../commands/tools.js';
 
 const program = new Command();
@@ -18,11 +19,21 @@ const program = new Command();
 program
   .name('gity')
   .description('AI-powered git commit agent — inspect your repo and create well-written commits')
-  .version('0.1.0');
+  .version('0.1.0')
+  .option('-d, --dry-run', 'Analyze changes and print a commit plan without touching git')
+  .option('-p, --provider <name>', 'Provider profile to use for this run')
+  .option('-m, --model <model>', 'Model override for this run')
+  .option('--max-iterations <n>', 'Maximum agent tool-calling iterations (default 15)')
+  .option('-v, --verbose', 'Show detailed tool call timing and status');
 
-// Default action: show repo status when run inside a git repo
-program.action(async () => {
+// Default action: run dry-run analysis when --dry-run is passed; otherwise show repo status
+program.action(async (opts: RunOptions) => {
   try {
+    if (opts.dryRun) {
+      await runAgent(opts);
+      return;
+    }
+
     const root = await findRepoRootAsync();
     if (!root) {
       console.error('Error: Not inside a git repository.');
@@ -57,6 +68,17 @@ function handle<A extends unknown[]>(fn: (...args: A) => Promise<void> | void): 
     }
   };
 }
+
+// gity run — run the commit analysis agent
+program
+  .command('run')
+  .description('Analyze uncommitted changes and print a commit plan (read-only)')
+  .option('-d, --dry-run', 'Analyze changes and print a commit plan without touching git', true)
+  .option('-p, --provider <name>', 'Provider profile to use for this run')
+  .option('-m, --model <model>', 'Model override for this run')
+  .option('--max-iterations <n>', 'Maximum agent tool-calling iterations (default 15)')
+  .option('-v, --verbose', 'Show detailed tool call timing and status')
+  .action(handle((opts: RunOptions) => runAgent({ ...program.opts<RunOptions>(), ...opts, dryRun: true }).then(() => undefined)));
 
 // gity setup — interactive provider setup wizard
 program

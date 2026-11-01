@@ -9,6 +9,9 @@ export type { Tool, ToolContext, ToolResult } from './tool.js';
 /** Every tool gity knows about. */
 export const ALL_TOOLS: readonly Tool[] = [...gitTools, grepTool, bashTool];
 
+/** Read-only tools safe for analysis / dry-run (status, diff, log, grep, bash). */
+export const READ_ONLY_TOOLS: readonly Tool[] = ALL_TOOLS.filter((t) => !t.mutating);
+
 export function getTool(name: string, tools: readonly Tool[] = ALL_TOOLS): Tool | undefined {
   return tools.find((t) => t.name === name);
 }
