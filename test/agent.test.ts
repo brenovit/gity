@@ -2,11 +2,17 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as clack from '@clack/prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_MAX_ITERATIONS, runAgentLoop } from '../src/agent/loop.js';
-import { buildAnalysisUserPrompt, READ_ONLY_SYSTEM_PROMPT } from '../src/agent/prompt.js';
-import { runAgent } from '../src/commands/run.js';
-import { READ_ONLY_TOOLS, toToolSpecs } from '../src/tools/index.js';
+import {
+  buildAnalysisUserPrompt,
+  buildCommitUserPrompt,
+  COMMIT_SYSTEM_PROMPT,
+  READ_ONLY_SYSTEM_PROMPT,
+} from '../src/agent/prompt.js';
+import { promptPlanConfirmation, runAgent } from '../src/commands/run.js';
+import { COMMIT_TOOLS, READ_ONLY_TOOLS, toToolSpecs } from '../src/tools/index.js';
 import type { ChatInput, ChatResult, Provider } from '../src/types.js';
 
 function git(cwd: string, ...args: string[]): string {
@@ -55,16 +61,27 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('READ_ONLY_TOOLS & prompt', () => {
-  it('includes only non-mutating tools', () => {
+describe('READ_ONLY_TOOLS, COMMIT_TOOLS & prompt', () => {
+  it('includes only non-mutating tools in READ_ONLY_TOOLS', () => {
     const names = READ_ONLY_TOOLS.map((t) => t.name);
     expect(names).toEqual(['git_status', 'git_diff', 'git_log', 'grep', 'bash']);
     expect(READ_ONLY_TOOLS.every((t) => !t.mutating)).toBe(true);
   });
 
+  it('enables git_add and git_commit in COMMIT_TOOLS while excluding git_pull', () => {
+    const names = COMMIT_TOOLS.map((t) => t.name);
+    expect(names).toEqual(['git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'grep', 'bash']);
+    expect(names).not.toContain('git_pull');
+  });
+
   it('builds system and user prompts mentioning read-only analysis and conventional commits', () => {
     expect(READ_ONLY_SYSTEM_PROMPT).toContain('git_status');
     expect(READ_ONLY_SYSTEM_PROMPT).toContain('Conventional Commits');
+    expect(COMMIT_SYSTEM_PROMPT).toContain('git_add');
+    expect(COMMIT_SYSTEM_PROMPT).toContain('git_commit');
+    expect(COMMIT_SYSTEM_PROMPT).toContain('git_status');
+    expect(buildCommitUserPrompt()).toContain('git_status after each commit');
+    expect(buildCommitUserPrompt('feat: custom message')).toContain('feat: custom message');
     const userPrompt = buildAnalysisUserPrompt({
       repoName: 'demo',
       branch: 'main',
@@ -336,6 +353,214 @@ describe('runAgent command', () => {
     const output = logSpy.mock.calls.flat().join('\n');
     expect(output).toContain('git_status()');
     expect(output).toContain('Commit 1: feat: add feature flag');
+  });
+
+  it('default flow: shows plan, asks confirmation (yes), creates multiple logical commits and verifies with git_status', async () => {
+    mkdirSync(join(repo, 'src'));
+    writeFileSync(join(repo, 'src', 'feature.ts'), 'export const feature = true;\n');
+    writeFileSync(join(repo, 'README.md'), '# Gity Test\n\nUpdated docs.\n');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const confirmPlan = vi.fn().mockResolvedValue({ action: 'yes' });
+
+    const { provider, calls } = scriptedProvider([
+      // Phase 1: read-only analysis
+      () => ({
+        text: '',
+        stopReason: 'tool_use',
+        toolCalls: [{ id: 'p1', name: 'git_status', args: {} }],
+      }),
+      () => ({
+        text: 'Plan:\n1. feat: add feature module (src/feature.ts)\n2. docs: update README (README.md)',
+        stopReason: 'end',
+        toolCalls: [],
+      }),
+      // Phase 2: commit execution
+      () => ({
+        text: '',
+        stopReason: 'tool_use',
+        toolCalls: [
+          { id: 'c1', name: 'git_add', args: { paths: ['src/feature.ts'] } },
+          { id: 'c2', name: 'git_commit', args: { message: 'feat: add feature module' } },
+          { id: 'c3', name: 'git_status', args: {} },
+        ],
+      }),
+      () => ({
+        text: '',
+        stopReason: 'tool_use',
+        toolCalls: [
+          { id: 'c4', name: 'git_add', args: { paths: ['README.md'] } },
+          { id: 'c5', name: 'git_commit', args: { message: 'docs: update README' } },
+          { id: 'c6', name: 'git_status', args: {} },
+        ],
+      }),
+      () => ({
+        text: 'Created 2 commits successfully.',
+        stopReason: 'end',
+        toolCalls: [],
+      }),
+    ]);
+
+    const res = await runAgent({
+      repoRoot: repo,
+      providerInstance: provider,
+      confirmPlan,
+    });
+
+    expect(confirmPlan).toHaveBeenCalledTimes(1);
+    expect(confirmPlan).toHaveBeenCalledWith(expect.stringContaining('feat: add feature module'));
+    expect(res?.stopReason).toBe('completed');
+    expect(res?.toolTraces.map((t) => t.call.name)).toEqual([
+      'git_status',
+      'git_add',
+      'git_commit',
+      'git_status',
+      'git_add',
+      'git_commit',
+      'git_status',
+    ]);
+
+    // Phase 1 advertised only READ_ONLY_TOOLS; Phase 2 advertised COMMIT_TOOLS
+    expect(calls[0]?.tools?.map((t) => t.name)).toEqual(READ_ONLY_TOOLS.map((t) => t.name));
+    expect(calls[2]?.tools?.map((t) => t.name)).toEqual(COMMIT_TOOLS.map((t) => t.name));
+
+    const commits = git(repo, 'log', '--pretty=format:%s', '-n', '3').trim().split('\n');
+    expect(commits).toEqual(['docs: update README', 'feat: add feature module', 'chore: initial commit']);
+    expect(git(repo, 'status', '--porcelain').trim()).toBe('');
+    expect(logSpy.mock.calls.flat().join('\n')).toContain('Created 2 commits successfully.');
+  });
+
+  it('default flow: aborts without touching git when confirmation is declined (no)', async () => {
+    writeFileSync(join(repo, 'feature.ts'), 'export const feature = true;\n');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const confirmPlan = vi.fn().mockResolvedValue({ action: 'no' });
+    const headBefore = git(repo, 'rev-parse', 'HEAD');
+
+    const { provider, calls } = scriptedProvider([
+      () => ({
+        text: 'Plan: feat: add feature (feature.ts)',
+        stopReason: 'end',
+        toolCalls: [],
+      }),
+    ]);
+
+    const res = await runAgent({
+      repoRoot: repo,
+      providerInstance: provider,
+      confirmPlan,
+    });
+
+    expect(confirmPlan).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveLength(1);
+    expect(res?.toolTraces).toHaveLength(0);
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(headBefore);
+    expect(git(repo, 'diff', '--cached', '--name-only')).toBe('');
+    expect(logSpy.mock.calls.flat().join('\n')).toContain('Aborted — no commits created.');
+  });
+
+  it('default flow: passes edited plan to commit phase when user chooses edit', async () => {
+    writeFileSync(join(repo, 'feature.ts'), 'export const feature = true;\n');
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const confirmPlan = vi.fn().mockResolvedValue({
+      action: 'edit',
+      plan: 'Use commit message "feat(core): add feature flag"',
+    });
+
+    const { provider, calls } = scriptedProvider([
+      () => ({
+        text: 'Plan: feat: add feature (feature.ts)',
+        stopReason: 'end',
+        toolCalls: [],
+      }),
+      (input) => {
+        const lastMsg = input.messages[input.messages.length - 1];
+        expect(lastMsg?.role).toBe('user');
+        expect(lastMsg?.content).toContain('feat(core): add feature flag');
+        return {
+          text: '',
+          stopReason: 'tool_use',
+          toolCalls: [
+            { id: 'c1', name: 'git_add', args: { paths: ['feature.ts'] } },
+            { id: 'c2', name: 'git_commit', args: { message: 'feat(core): add feature flag' } },
+            { id: 'c3', name: 'git_status', args: {} },
+          ],
+        };
+      },
+      () => ({
+        text: 'Committed with edited message.',
+        stopReason: 'end',
+        toolCalls: [],
+      }),
+    ]);
+
+    const res = await runAgent({
+      repoRoot: repo,
+      providerInstance: provider,
+      confirmPlan,
+    });
+
+    expect(confirmPlan).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveLength(3);
+    expect(res?.stopReason).toBe('completed');
+    expect(git(repo, 'log', '-1', '--pretty=format:%s').trim()).toBe('feat(core): add feature flag');
+  });
+
+  it('--yes skips confirmation and automatically verifies with git_status if omitted by the model', async () => {
+    writeFileSync(join(repo, 'feature.ts'), 'export const feature = true;\n');
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const confirmPlan = vi.fn();
+
+    const { provider } = scriptedProvider([
+      () => ({
+        text: 'Plan: feat: add feature flag (feature.ts)',
+        stopReason: 'end',
+        toolCalls: [],
+      }),
+      () => ({
+        text: '',
+        stopReason: 'tool_use',
+        toolCalls: [
+          { id: 'c1', name: 'git_add', args: { paths: ['feature.ts'] } },
+          { id: 'c2', name: 'git_commit', args: { message: 'feat: add feature flag' } },
+        ],
+      }),
+      () => ({
+        text: 'Committed.',
+        stopReason: 'end',
+        toolCalls: [],
+      }),
+    ]);
+
+    const res = await runAgent({
+      repoRoot: repo,
+      providerInstance: provider,
+      yes: true,
+      confirmPlan,
+    });
+
+    expect(confirmPlan).not.toHaveBeenCalled();
+    expect(res?.stopReason).toBe('completed');
+    // git_status was automatically appended after git_commit to verify repo state
+    expect(res?.toolTraces.map((t) => t.call.name)).toEqual(['git_add', 'git_commit', 'git_status']);
+    expect(git(repo, 'log', '-1', '--pretty=format:%s').trim()).toBe('feat: add feature flag');
+  });
+
+  it('promptPlanConfirmation handles yes, no, and edit choices', async () => {
+    const select = vi.fn();
+    const text = vi.fn();
+    const driver = { select, text, isCancel: clack.isCancel };
+
+    select.mockResolvedValueOnce('yes');
+    expect(await promptPlanConfirmation('initial plan', driver)).toEqual({ action: 'yes' });
+
+    select.mockResolvedValueOnce('no');
+    expect(await promptPlanConfirmation('initial plan', driver)).toEqual({ action: 'no' });
+
+    select.mockResolvedValueOnce('edit');
+    text.mockResolvedValueOnce('  feat: updated plan  ');
+    expect(await promptPlanConfirmation('initial plan', driver)).toEqual({
+      action: 'edit',
+      plan: 'feat: updated plan',
+    });
   });
 });
 

@@ -21,15 +21,16 @@ program
   .description('AI-powered git commit agent — inspect your repo and create well-written commits')
   .version('0.1.0')
   .option('-d, --dry-run', 'Analyze changes and print a commit plan without touching git')
+  .option('-y, --yes', 'Skip confirmation prompts and commit immediately')
   .option('-p, --provider <name>', 'Provider profile to use for this run')
   .option('-m, --model <model>', 'Model override for this run')
   .option('--max-iterations <n>', 'Maximum agent tool-calling iterations (default 15)')
   .option('-v, --verbose', 'Show detailed tool call timing and status');
 
-// Default action: run dry-run analysis when --dry-run is passed; otherwise show repo status
+// Default action: run agent when --dry-run or --yes is passed; otherwise show repo status
 program.action(async (opts: RunOptions) => {
   try {
-    if (opts.dryRun) {
+    if (opts.dryRun || opts.yes) {
       await runAgent(opts);
       return;
     }
@@ -69,16 +70,17 @@ function handle<A extends unknown[]>(fn: (...args: A) => Promise<void> | void): 
   };
 }
 
-// gity run — run the commit analysis agent
+// gity run — run the commit agent
 program
   .command('run')
-  .description('Analyze uncommitted changes and print a commit plan (read-only)')
-  .option('-d, --dry-run', 'Analyze changes and print a commit plan without touching git', true)
+  .description('Analyze uncommitted changes, confirm plan, and create commits')
+  .option('-d, --dry-run', 'Analyze changes and print a commit plan without touching git')
+  .option('-y, --yes', 'Skip confirmation prompts and commit immediately')
   .option('-p, --provider <name>', 'Provider profile to use for this run')
   .option('-m, --model <model>', 'Model override for this run')
   .option('--max-iterations <n>', 'Maximum agent tool-calling iterations (default 15)')
   .option('-v, --verbose', 'Show detailed tool call timing and status')
-  .action(handle((opts: RunOptions) => runAgent({ ...program.opts<RunOptions>(), ...opts, dryRun: true }).then(() => undefined)));
+  .action(handle((opts: RunOptions) => runAgent({ ...program.opts<RunOptions>(), ...opts }).then(() => undefined)));
 
 // gity setup — interactive provider setup wizard
 program

@@ -12,6 +12,9 @@ export const ALL_TOOLS: readonly Tool[] = [...gitTools, grepTool, bashTool];
 /** Read-only tools safe for analysis / dry-run (status, diff, log, grep, bash). */
 export const READ_ONLY_TOOLS: readonly Tool[] = ALL_TOOLS.filter((t) => !t.mutating);
 
+/** Tools enabled for committing (read-only tools + git_add + git_commit; excludes git_pull). */
+export const COMMIT_TOOLS: readonly Tool[] = ALL_TOOLS.filter((t) => t.name !== 'git_pull');
+
 export function getTool(name: string, tools: readonly Tool[] = ALL_TOOLS): Tool | undefined {
   return tools.find((t) => t.name === name);
 }

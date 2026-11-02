@@ -43,3 +43,39 @@ export function buildAnalysisUserPrompt(status?: RepoStatus): string {
   return `${header}Analyze all uncommitted and untracked changes in this repository using the read-only tools and produce a proposed commit plan (grouped files and commit messages). Do not modify git state.`;
 }
 
+/**
+ * System prompt for the commit execution phase (`git_add`, `git_commit`, and `git_status` verification).
+ */
+export const COMMIT_SYSTEM_PROMPT = `You are Gity, an expert AI git commit assistant.
+Your job is to execute an approved commit plan by staging specific files and creating logical, atomic commits.
+
+## Available Tools
+- \`git_status\`: Inspect staged, unstaged, and untracked files (and branch info). Secret files are flagged with \`[secret: never stage]\`.
+- \`git_diff\`: Inspect unified diffs of unstaged (\`staged: false\`) or staged (\`staged: true\`) changes.
+- \`git_log\`: Inspect recent commits to match the repository's commit message style.
+- \`grep\`: Search repository contents.
+- \`bash\`: Run read-only commands (\`ls\`, \`cat\`, \`head\`, \`tail\`, \`wc\`, \`file\`, \`pwd\`, \`tree\`).
+- \`git_add\`: Stage specific repo-relative file paths. Never pass directories, \`.\`, \`-A\`, or globs.
+- \`git_commit\`: Create a commit from currently staged changes with a Conventional Commits message.
+
+## Commit Execution Rules
+1. **Stage specific paths only**: Always pass explicit repo-relative file paths to \`git_add\` (never \`-A\`, \`.\`, directories, or globs).
+2. **Never stage secrets**: Never stage or commit secret files (\`.env*\`, \`*.pem\`, \`*.key\`, \`*.p12\`, \`*.pfx\`, \`id_rsa*\`, etc.).
+3. **One logical commit at a time**: For each planned commit in order:
+   - Call \`git_add\` with the exact file paths for that commit.
+   - Call \`git_commit\` with the commit message.
+   - Call \`git_status\` immediately after each \`git_commit\` to verify the working tree state.
+4. **Conventional Commits format**:
+   - Use \`<type>(<optional scope>): <imperative subject>\` (types: \`feat\`, \`fix\`, \`refactor\`, \`docs\`, \`test\`, \`chore\`, \`perf\`, \`build\`, \`ci\`, \`style\`, \`revert\`).
+   - Subject line MUST use imperative mood, be <= 72 characters, and have no trailing period.
+   - Separate an optional commit body from the subject line with a blank line.
+5. When all commits have been created and verified with \`git_status\`, stop calling tools and output a concise summary of the commits created.`;
+
+/** Build the user prompt for executing the approved (or user-edited) commit plan. */
+export function buildCommitUserPrompt(editedPlan?: string): string {
+  if (editedPlan && editedPlan.trim().length > 0) {
+    return `The user edited the commit plan / instructions. Execute the commits following these updated instructions:\n\n${editedPlan.trim()}\n\nFor each commit, stage specific file paths with git_add, commit with git_commit using Conventional Commits format (imperative subject <= 72 chars), and verify with git_status after each commit.`;
+  }
+  return 'The user approved the commit plan. Proceed to stage the specific file paths with git_add, create each commit in order with git_commit using Conventional Commits format (imperative subject <= 72 chars), and verify with git_status after each commit.';
+}
+

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { checkCommand, tokenize } from '../src/tools/bash.js';
+import { validateCommitMessage } from '../src/tools/git.js';
 import { runTool, toToolSpecs } from '../src/tools/index.js';
 import { isInside, isSecretPath, resolveRepoPath, truncate } from '../src/tools/safety.js';
 import type { ToolContext } from '../src/tools/tool.js';
@@ -224,6 +225,30 @@ describe('git tools', () => {
     const r = await runTool('git_add', { paths: ['README.md'] }, ctx);
     expect(r.ok).toBe(true);
     expect(r.output).toMatch(/D\s+README\.md/);
+  });
+
+  it('validates Conventional Commits format, imperative mood, and subject <= 72 chars', async () => {
+    expect(validateCommitMessage('feat: add user login')).toBeNull();
+    expect(validateCommitMessage('fix(auth): handle expired token\n\nDetailed body here.')).toBeNull();
+    expect(validateCommitMessage(`chore: ${'a'.repeat(65)}`)).toBeNull(); // exactly 72 chars
+
+    expect(validateCommitMessage(`chore: ${'a'.repeat(66)}`)).toMatch(/<= 72 characters/);
+    expect(validateCommitMessage('update readme')).toMatch(/Conventional Commits/);
+    expect(validateCommitMessage('feat: add user login.')).toMatch(/period/);
+    expect(validateCommitMessage('feat: added user login')).toMatch(/imperative mood/);
+    expect(validateCommitMessage('fix: fixing bug')).toMatch(/imperative mood/);
+    expect(validateCommitMessage('feat: add login\nbody without blank line')).toMatch(/blank line/);
+
+    writeFileSync(join(repo, 'README.md'), '# Updated\n');
+    await runTool('git_add', { paths: ['README.md'] }, ctx);
+
+    const nonConventional = await runTool('git_commit', { message: 'update readme' }, ctx);
+    expect(nonConventional.ok).toBe(false);
+    expect(nonConventional.output).toMatch(/Invalid commit message: .*Conventional Commits/);
+
+    const tooLong = await runTool('git_commit', { message: `feat: ${'x'.repeat(70)}` }, ctx);
+    expect(tooLong.ok).toBe(false);
+    expect(tooLong.output).toMatch(/Invalid commit message: .*<= 72 characters/);
   });
 });
 

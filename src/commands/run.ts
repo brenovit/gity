@@ -1,13 +1,29 @@
+import * as p from '@clack/prompts';
 import { DEFAULT_MAX_ITERATIONS, runAgentLoop, type AgentLoopResult } from '../agent/loop.js';
-import { buildAnalysisUserPrompt, READ_ONLY_SYSTEM_PROMPT } from '../agent/prompt.js';
+import {
+  buildAnalysisUserPrompt,
+  buildCommitUserPrompt,
+  COMMIT_SYSTEM_PROMPT,
+  READ_ONLY_SYSTEM_PROMPT,
+} from '../agent/prompt.js';
 import { loadConfig, resolveProvider } from '../config.js';
 import { createProvider, type Provider } from '../providers/index.js';
-import { READ_ONLY_TOOLS } from '../tools/index.js';
+import { runGit } from '../tools/git.js';
+import { COMMIT_TOOLS, READ_ONLY_TOOLS, runTool, type ToolResult } from '../tools/index.js';
+import { isSecretPath } from '../tools/safety.js';
 import type { ToolCall } from '../types.js';
 import { findRepoRootAsync, getRepoStatusAsync } from '../util/repo.js';
 
+export type PlanDecision =
+  | { action: 'yes' }
+  | { action: 'no' }
+  | { action: 'edit'; plan: string };
+
+export type ConfirmPlanFn = (plan: string) => Promise<PlanDecision> | PlanDecision;
+
 export interface RunOptions {
   dryRun?: boolean;
+  yes?: boolean;
   provider?: string;
   model?: string;
   maxIterations?: number | string;
@@ -16,6 +32,7 @@ export interface RunOptions {
   repoRoot?: string;
   configPath?: string;
   providerInstance?: Provider;
+  confirmPlan?: ConfirmPlanFn;
 }
 
 function formatToolArgs(args: Record<string, unknown>): string {
@@ -34,8 +51,66 @@ function parseMaxIterations(raw: number | string | undefined): number {
   return n;
 }
 
+/** Check if the repository has at least one non-secret changed or untracked file. */
+async function hasCommittableChanges(repoRoot: string): Promise<boolean> {
+  const r = await runGit({ repoRoot }, ['status', '--porcelain=v1', '--untracked-files=all']);
+  if (r.code !== 0) return false;
+  const lines = r.stdout.split('\n').filter((l) => l.length > 0 && !l.startsWith('##'));
+  return lines.some((line) => {
+    const path = line.slice(3).split(' -> ').pop() ?? '';
+    return path.length > 0 && !isSecretPath(path);
+  });
+}
+
+export interface PromptDriver {
+  select: typeof p.select;
+  text: typeof p.text;
+  isCancel: typeof p.isCancel;
+}
+
+/** Interactive y/n/edit confirmation prompt for the proposed commit plan. */
+export async function promptPlanConfirmation(
+  plan: string,
+  prompts: PromptDriver = p,
+): Promise<PlanDecision> {
+  const choice = await prompts.select({
+    message: 'Proceed with this commit plan? (y/n/edit)',
+    options: [
+      { value: 'yes' as const, label: 'Yes — create commits (y)' },
+      { value: 'edit' as const, label: 'Edit — modify plan or commit messages (edit)' },
+      { value: 'no' as const, label: 'No — abort without committing (n)' },
+    ],
+  });
+
+  if (prompts.isCancel(choice) || choice === 'no') {
+    return { action: 'no' };
+  }
+
+  if (choice === 'edit') {
+    const edited = await prompts.text({
+      message: 'Enter updated commit plan or instructions for the agent:',
+      placeholder: 'e.g. feat(cli): add interactive commit confirmation',
+      defaultValue: plan,
+      validate: (value) => {
+        if (!value || value.trim().length === 0) {
+          return 'Edited plan or instructions cannot be empty';
+        }
+        return undefined;
+      },
+    });
+
+    if (prompts.isCancel(edited)) {
+      return { action: 'no' };
+    }
+
+    return { action: 'edit', plan: edited.trim() };
+  }
+
+  return { action: 'yes' };
+}
+
 /**
- * Run the read-only commit analysis agent and print the proposed commit plan.
+ * Run the commit agent: analyze changes, display the commit plan, optionally confirm (y/n/edit), and commit.
  */
 export async function runAgent(opts: RunOptions = {}): Promise<AgentLoopResult | null> {
   const repoRoot = opts.repoRoot ?? (await findRepoRootAsync());
@@ -59,49 +134,144 @@ export async function runAgent(opts: RunOptions = {}): Promise<AgentLoopResult |
     provider = createProvider(profile);
   }
 
+  const logToolCall = (call: ToolCall, iteration: number): void => {
+    const argText = formatToolArgs(call.args);
+    const callDesc = argText ? `${call.name}(${argText})` : `${call.name}()`;
+    if (opts.verbose) {
+      console.log(`  [step ${iteration}] -> ${callDesc}`);
+    } else {
+      console.log(`  -> ${callDesc}`);
+    }
+  };
+
+  const logToolResult = (call: ToolCall, toolResult: ToolResult, durationMs: number): void => {
+    if (opts.verbose) {
+      const statusLabel = toolResult.ok ? 'ok' : 'error';
+      const truncLabel = toolResult.truncated ? ', truncated' : '';
+      console.log(`  <- ${call.name} [${statusLabel}, ${durationMs}ms${truncLabel}]`);
+    }
+  };
+
+  const modeLabel = opts.dryRun ? ' [dry-run]' : '';
   console.log(
-    `Analyzing ${status.repoName} (${status.branch || 'detached HEAD'}: ${status.summary}) using ${provider.name} [dry-run]...`,
+    `Analyzing ${status.repoName} (${status.branch || 'detached HEAD'}: ${status.summary}) using ${provider.name}${modeLabel}...`,
   );
 
-  const result = await runAgentLoop({
+  const planResult = await runAgentLoop({
     provider,
     system: READ_ONLY_SYSTEM_PROMPT,
     userPrompt: buildAnalysisUserPrompt(status),
     repoRoot,
     tools: READ_ONLY_TOOLS,
     maxIterations,
-    onToolCall(call: ToolCall, iteration: number) {
-      const argText = formatToolArgs(call.args);
-      const callDesc = argText ? `${call.name}(${argText})` : `${call.name}()`;
-      if (opts.verbose) {
-        console.log(`  [step ${iteration}] -> ${callDesc}`);
-      } else {
-        console.log(`  -> ${callDesc}`);
-      }
-    },
-    onToolResult(call, toolResult, durationMs) {
-      if (opts.verbose) {
-        const statusLabel = toolResult.ok ? 'ok' : 'error';
-        const truncLabel = toolResult.truncated ? ', truncated' : '';
-        console.log(`  <- ${call.name} [${statusLabel}, ${durationMs}ms${truncLabel}]`);
-      }
-    },
+    onToolCall: logToolCall,
+    onToolResult: logToolResult,
   });
 
   console.log();
-  if (result.text) {
-    console.log(result.text);
+  if (planResult.text) {
+    console.log(planResult.text);
   } else {
     console.log('(No commit plan returned by the model.)');
   }
 
-  if (result.stopReason !== 'completed') {
-    console.error(`\nWarning: Agent stopped with reason "${result.stopReason}" after ${result.iterations} iteration(s).`);
-    if (!result.text || result.stopReason === 'error') {
+  if (planResult.stopReason !== 'completed') {
+    console.error(
+      `\nWarning: Agent stopped with reason "${planResult.stopReason}" after ${planResult.iterations} iteration(s).`,
+    );
+    if (!planResult.text || planResult.stopReason === 'error') {
+      process.exitCode = 1;
+    }
+    return planResult;
+  }
+
+  if (opts.dryRun) {
+    return planResult;
+  }
+
+  if (!planResult.text) {
+    process.exitCode = 1;
+    return planResult;
+  }
+
+  if (!(await hasCommittableChanges(repoRoot))) {
+    return planResult;
+  }
+
+  let editedPlan: string | undefined;
+  if (!opts.yes) {
+    const confirmFn = opts.confirmPlan ?? promptPlanConfirmation;
+    const decision = await confirmFn(planResult.text);
+    if (decision.action === 'no') {
+      console.log('\nAborted — no commits created.');
+      return planResult;
+    }
+    if (decision.action === 'edit') {
+      editedPlan = decision.plan;
+    }
+  }
+
+  console.log('\nCreating commits...');
+  const commitResult = await runAgentLoop({
+    provider,
+    system: COMMIT_SYSTEM_PROMPT,
+    initialMessages: planResult.messages,
+    userPrompt: buildCommitUserPrompt(editedPlan),
+    repoRoot,
+    tools: COMMIT_TOOLS,
+    maxIterations,
+    onToolCall: logToolCall,
+    onToolResult: logToolResult,
+  });
+
+  // Ensure git_status verification runs after the final commit if the model omitted it.
+  let lastCommitIdx = -1;
+  let lastStatusIdx = -1;
+  for (let i = 0; i < commitResult.toolTraces.length; i++) {
+    const trace = commitResult.toolTraces[i];
+    if (!trace) continue;
+    if (trace.call.name === 'git_commit' && trace.result.ok) {
+      lastCommitIdx = i;
+    } else if (trace.call.name === 'git_status') {
+      lastStatusIdx = i;
+    }
+  }
+
+  if (lastCommitIdx !== -1 && lastStatusIdx < lastCommitIdx) {
+    const verifyCall: ToolCall = { id: 'post_commit_verify', name: 'git_status', args: {} };
+    logToolCall(verifyCall, commitResult.iterations);
+    const verifyStart = Date.now();
+    const verifyResult = await runTool('git_status', {}, { repoRoot }, COMMIT_TOOLS);
+    const verifyDuration = Date.now() - verifyStart;
+    logToolResult(verifyCall, verifyResult, verifyDuration);
+    commitResult.toolTraces.push({
+      iteration: commitResult.iterations,
+      call: verifyCall,
+      result: verifyResult,
+      durationMs: verifyDuration,
+    });
+  }
+
+  if (commitResult.text) {
+    console.log();
+    console.log(commitResult.text);
+  }
+
+  if (commitResult.stopReason !== 'completed') {
+    console.error(
+      `\nWarning: Agent stopped with reason "${commitResult.stopReason}" after ${commitResult.iterations} commit iteration(s).`,
+    );
+    if (commitResult.stopReason === 'error') {
       process.exitCode = 1;
     }
   }
 
-  return result;
+  return {
+    text: commitResult.text || planResult.text,
+    messages: commitResult.messages,
+    toolTraces: [...planResult.toolTraces, ...commitResult.toolTraces],
+    iterations: planResult.iterations + commitResult.iterations,
+    stopReason: commitResult.stopReason,
+  };
 }
 

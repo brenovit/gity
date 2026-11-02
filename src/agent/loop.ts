@@ -30,6 +30,8 @@ export interface AgentLoopOptions {
   system: string;
   userPrompt: string;
   repoRoot: string;
+  /** Optional prior conversation messages to continue from. */
+  initialMessages?: readonly Message[];
   /** Tools exposed to the model and dispatcher. Defaults to READ_ONLY_TOOLS. */
   tools?: readonly Tool[];
   /** Maximum LLM turns before stopping (default 15, clamped to 1..50). */
@@ -85,7 +87,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const maxDurationMs = options.maxDurationMs ?? DEFAULT_MAX_DURATION_MS;
   const maxTotalChars = options.maxTotalChars ?? DEFAULT_MAX_TOTAL_CHARS;
 
-  const messages: Message[] = [{ role: 'user', content: options.userPrompt }];
+  const messages: Message[] = [
+    ...(options.initialMessages ?? []),
+    { role: 'user', content: options.userPrompt },
+  ];
   const toolTraces: AgentToolTrace[] = [];
   const startedAt = Date.now();
   let latestText = '';

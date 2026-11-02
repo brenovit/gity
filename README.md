@@ -54,7 +54,15 @@ Shows repo name, branch, and changed/untracked file counts.
 gity run
 ```
 
-The agent inspects your changes, groups them, and asks for confirmation before committing.
+The agent inspects your changes, prints a proposed commit plan, and prompts for confirmation (`y` to commit, `n` to abort, or `edit` to modify the plan/messages). Once confirmed, it stages specific file paths (`git_add`), creates each commit in Conventional Commits format (`<= 72` char imperative subject), and verifies the repository with `git_status` after each commit.
+
+Skip confirmation and commit immediately with `--yes`:
+
+```bash
+gity run --yes
+# or
+gity --yes
+```
 
 ### 4. Dry-run (no changes)
 

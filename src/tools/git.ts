@@ -48,6 +48,89 @@ async function toPathspecs(ctx: ToolContext, paths: readonly string[], opts: { a
 
 const pathList = z.array(z.string().min(1)).max(100);
 
+export const MAX_COMMIT_SUBJECT_LENGTH = 72;
+
+export const CONVENTIONAL_COMMIT_TYPES = [
+  'feat',
+  'fix',
+  'refactor',
+  'docs',
+  'test',
+  'chore',
+  'perf',
+  'build',
+  'ci',
+  'style',
+  'revert',
+] as const;
+
+const CONVENTIONAL_SUBJECT_RE =
+  /^(feat|fix|refactor|docs|test|chore|perf|build|ci|style|revert)(\([^)\r\n]+\))?!?: (\S.*)$/;
+
+const NON_IMPERATIVE_VERBS = new Set([
+  'added',
+  'adding',
+  'fixed',
+  'fixing',
+  'updated',
+  'updating',
+  'removed',
+  'removing',
+  'changed',
+  'changing',
+  'created',
+  'creating',
+  'deleted',
+  'deleting',
+  'implemented',
+  'implementing',
+  'refactored',
+  'refactoring',
+  'moved',
+  'moving',
+  'renamed',
+  'renaming',
+]);
+
+/**
+ * Validate that a commit message follows Conventional Commits with an imperative subject <= 72 chars.
+ * Returns null when valid, or a human-readable error message when invalid.
+ */
+export function validateCommitMessage(message: string): string | null {
+  const trimmed = message.trim();
+  if (trimmed.length === 0) {
+    return 'Commit message cannot be empty.';
+  }
+
+  const lines = trimmed.split(/\r?\n/);
+  const subject = (lines[0] ?? '').trim();
+
+  if (subject.length > MAX_COMMIT_SUBJECT_LENGTH) {
+    return `Commit subject must be <= ${MAX_COMMIT_SUBJECT_LENGTH} characters (got ${subject.length}: "${subject}").`;
+  }
+
+  const match = CONVENTIONAL_SUBJECT_RE.exec(subject);
+  if (!match) {
+    return `Commit subject must follow Conventional Commits format "<type>[optional scope]: <imperative subject>" (allowed types: ${CONVENTIONAL_COMMIT_TYPES.join(', ')}).`;
+  }
+
+  if (subject.endsWith('.')) {
+    return 'Commit subject must not end with a period.';
+  }
+
+  const description = (match[3] ?? '').trim();
+  const firstWord = (description.split(/\s+/)[0] ?? '').toLowerCase().replace(/[^a-z]/g, '');
+  if (NON_IMPERATIVE_VERBS.has(firstWord)) {
+    return `Commit subject must use imperative mood (found "${firstWord}" in "${subject}").`;
+  }
+
+  if (lines.length > 1 && (lines[1] ?? '').trim().length > 0) {
+    return 'Commit message must include a blank line between the subject line and body.';
+  }
+
+  return null;
+}
+
 export const gitStatusTool = defineTool({
   name: 'git_status',
   description:
@@ -140,12 +223,22 @@ export const gitAddTool = defineTool({
 
 export const gitCommitTool = defineTool({
   name: 'git_commit',
-  description: 'Create a commit from the currently staged changes with the given message. Fails if nothing is staged or a secret file is staged.',
+  description:
+    'Create a commit from the currently staged changes with the given message (Conventional Commits format, imperative subject <= 72 chars). Fails if nothing is staged or a secret file is staged.',
   schema: z.object({
-    message: z.string().trim().min(1).max(5000).describe('Full commit message (subject, optional blank line + body)'),
+    message: z
+      .string()
+      .trim()
+      .min(1)
+      .max(5000)
+      .describe('Full commit message (Conventional Commits subject <= 72 chars, optional blank line + body)'),
   }),
   mutating: true,
   async run(args, ctx) {
+    const messageError = validateCommitMessage(args.message);
+    if (messageError) {
+      return { ok: false, output: `Invalid commit message: ${messageError}` };
+    }
     const staged = await runGit(ctx, ['diff', '--cached', '--name-only', '-z']);
     if (staged.code !== 0) return failure(staged);
     const files = staged.stdout.split('\0').filter((f) => f.length > 0);

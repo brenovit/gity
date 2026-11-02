@@ -127,7 +127,7 @@ interface Provider {
 - Implement the loop and system prompt. Agent uses only read tools (status, diff, grep, log, bash)
 - `gity --dry-run` makes the agent analyze changes and print a commit plan (groups of files, proposed messages) without touching git
 
-### Stage 6: Committing
+### Stage 6: Committing ✅
 - Enable `git_add` (specific paths only, never `-A` blindly) and `git_commit`
 - Default flow: show plan, ask for confirmation (`y/n/edit`), then commit
 - Flags: `--yes` to skip confirmation, `--dry-run` still available
