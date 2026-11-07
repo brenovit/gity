@@ -28,6 +28,8 @@ export interface ChatInput {
   messages: Message[];
   tools?: ToolSpec[];
   signal?: AbortSignal;
+  /** Optional callback invoked as streaming text chunks arrive. */
+  onTextDelta?: (delta: string) => void;
 }
 
 export interface Provider {

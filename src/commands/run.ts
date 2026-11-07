@@ -2,13 +2,15 @@ import * as p from '@clack/prompts';
 import { DEFAULT_MAX_ITERATIONS, runAgentLoop, type AgentLoopResult } from '../agent/loop.js';
 import {
   buildAnalysisUserPrompt,
+  buildCommitSystemPrompt,
   buildCommitUserPrompt,
-  COMMIT_SYSTEM_PROMPT,
-  READ_ONLY_SYSTEM_PROMPT,
+  buildReadOnlySystemPrompt,
 } from '../agent/prompt.js';
 import {
+  DEFAULT_COMMIT_STYLE,
   DEFAULT_PULL_STRATEGY,
   loadConfig,
+  loadRepoConfig,
   parsePullStrategy,
   resolveProvider,
   type Config,
@@ -17,8 +19,9 @@ import {
 import { createProvider, type Provider } from '../providers/index.js';
 import { executeGitPull, runGit } from '../tools/git.js';
 import { COMMIT_TOOLS, READ_ONLY_TOOLS, runTool, type ToolResult } from '../tools/index.js';
-import { isSecretPath } from '../tools/safety.js';
+import { isIgnoredPath, isSecretPath } from '../tools/safety.js';
 import type { ToolCall } from '../types.js';
+import { createProgressLogger } from '../util/logger.js';
 import { findRepoRootAsync, getRepoStatusAsync } from '../util/repo.js';
 
 export type PlanDecision =
@@ -46,9 +49,10 @@ export interface RunOptions {
   configPath?: string;
   providerInstance?: Provider;
   confirmPlan?: ConfirmPlanFn;
+  isTTY?: boolean;
 }
 
-function formatToolArgs(args: Record<string, unknown>): string {
+export function formatToolArgs(args: Record<string, unknown>): string {
   const entries = Object.entries(args);
   if (entries.length === 0) return '';
   const summary = entries.map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ');
@@ -64,14 +68,14 @@ function parseMaxIterations(raw: number | string | undefined): number {
   return n;
 }
 
-/** Check if the repository has at least one non-secret changed or untracked file. */
-async function hasCommittableChanges(repoRoot: string): Promise<boolean> {
+/** Check if the repository has at least one non-secret, non-ignored changed or untracked file. */
+async function hasCommittableChanges(repoRoot: string, ignorePatterns?: readonly string[]): Promise<boolean> {
   const r = await runGit({ repoRoot }, ['status', '--porcelain=v1', '--untracked-files=all']);
   if (r.code !== 0) return false;
   const lines = r.stdout.split('\n').filter((l) => l.length > 0 && !l.startsWith('##'));
   return lines.some((line) => {
     const path = line.slice(3).split(' -> ').pop() ?? '';
-    return path.length > 0 && !isSecretPath(path);
+    return path.length > 0 && !isSecretPath(path) && !isIgnoredPath(path, ignorePatterns);
   });
 }
 
@@ -145,12 +149,18 @@ export async function runAgent(opts: RunOptions = {}): Promise<AgentLoopResult |
     return null;
   }
 
+  const repoConfig = await loadRepoConfig(repoRoot);
+  const ignorePatterns = repoConfig.ignore;
+  const commitStyle = repoConfig.commitStyle ?? DEFAULT_COMMIT_STYLE;
+
   let config: Config | undefined;
   let provider = opts.providerInstance;
   if (!provider) {
     config = await loadConfig(opts.configPath);
-    const resolved = resolveProvider(config, opts.provider);
-    const profile = opts.model ? { ...resolved.profile, model: opts.model.trim() } : resolved.profile;
+    const providerName = opts.provider ?? repoConfig.provider;
+    const resolved = resolveProvider(config, providerName);
+    const modelOverride = opts.model?.trim() || repoConfig.model;
+    const profile = modelOverride ? { ...resolved.profile, model: modelOverride } : resolved.profile;
     provider = createProvider(profile);
   } else if (opts.configPath) {
     config = await loadConfig(opts.configPath);
@@ -158,49 +168,44 @@ export async function runAgent(opts: RunOptions = {}): Promise<AgentLoopResult |
 
   const pullStrategy: PullStrategy = opts.pullStrategy
     ? parsePullStrategy(String(opts.pullStrategy))
-    : (config?.pullStrategy ?? DEFAULT_PULL_STRATEGY);
+    : (repoConfig.pullStrategy ?? config?.pullStrategy ?? DEFAULT_PULL_STRATEGY);
   const shouldPull = opts.noPull !== true && opts.pull !== false && pullStrategy !== 'none';
+
+  const progress = createProgressLogger({
+    verbose: opts.verbose,
+    isTTY: opts.isTTY ?? false,
+  });
 
   const logToolCall = (call: ToolCall, iteration: number): void => {
     const argText = formatToolArgs(call.args);
     const callDesc = argText ? `${call.name}(${argText})` : `${call.name}()`;
-    if (opts.verbose) {
-      console.log(`  [step ${iteration}] -> ${callDesc}`);
-    } else {
-      console.log(`  -> ${callDesc}`);
-    }
+    progress.logToolCall(callDesc, iteration);
   };
 
   const logToolResult = (call: ToolCall, toolResult: ToolResult, durationMs: number): void => {
-    if (opts.verbose) {
-      const statusLabel = toolResult.ok ? 'ok' : 'error';
-      const truncLabel = toolResult.truncated ? ', truncated' : '';
-      console.log(`  <- ${call.name} [${statusLabel}, ${durationMs}ms${truncLabel}]`);
-    }
+    progress.logToolResult(call.name, toolResult.ok, durationMs, toolResult.truncated);
   };
 
   const modeLabel = opts.dryRun ? ' [dry-run]' : '';
-  console.log(
+  progress.startPhase(
     `Analyzing ${status.repoName} (${status.branch || 'detached HEAD'}: ${status.summary}) using ${provider.name}${modeLabel}...`,
   );
 
   const planResult = await runAgentLoop({
     provider,
-    system: READ_ONLY_SYSTEM_PROMPT,
+    system: buildReadOnlySystemPrompt({ commitStyle, ignorePatterns }),
     userPrompt: buildAnalysisUserPrompt(status),
     repoRoot,
     tools: READ_ONLY_TOOLS,
     maxIterations,
+    ignorePatterns,
+    commitStyle,
     onToolCall: logToolCall,
     onToolResult: logToolResult,
+    onTextDelta: (delta) => progress.onTextDelta(delta),
   });
 
-  console.log();
-  if (planResult.text) {
-    console.log(planResult.text);
-  } else {
-    console.log('(No commit plan returned by the model.)');
-  }
+  progress.finishPhase(planResult.text || '(No commit plan returned by the model.)');
 
   if (planResult.stopReason !== 'completed') {
     console.error(
@@ -221,7 +226,7 @@ export async function runAgent(opts: RunOptions = {}): Promise<AgentLoopResult |
     return planResult;
   }
 
-  if (!(await hasCommittableChanges(repoRoot))) {
+  if (!(await hasCommittableChanges(repoRoot, ignorePatterns))) {
     return planResult;
   }
 
@@ -238,17 +243,20 @@ export async function runAgent(opts: RunOptions = {}): Promise<AgentLoopResult |
     }
   }
 
-  console.log('\nCreating commits...');
+  progress.startPhase('\nCreating commits...');
   const commitResult = await runAgentLoop({
     provider,
-    system: COMMIT_SYSTEM_PROMPT,
+    system: buildCommitSystemPrompt({ commitStyle, ignorePatterns }),
     initialMessages: planResult.messages,
-    userPrompt: buildCommitUserPrompt(editedPlan),
+    userPrompt: buildCommitUserPrompt(editedPlan, commitStyle),
     repoRoot,
     tools: COMMIT_TOOLS,
     maxIterations,
+    ignorePatterns,
+    commitStyle,
     onToolCall: logToolCall,
     onToolResult: logToolResult,
+    onTextDelta: (delta) => progress.onTextDelta(delta),
   });
 
   // Ensure git_status verification runs after the final commit if the model omitted it.
@@ -268,7 +276,7 @@ export async function runAgent(opts: RunOptions = {}): Promise<AgentLoopResult |
     const verifyCall: ToolCall = { id: 'post_commit_verify', name: 'git_status', args: {} };
     logToolCall(verifyCall, commitResult.iterations);
     const verifyStart = Date.now();
-    const verifyResult = await runTool('git_status', {}, { repoRoot }, COMMIT_TOOLS);
+    const verifyResult = await runTool('git_status', {}, { repoRoot, ignorePatterns, commitStyle }, COMMIT_TOOLS);
     const verifyDuration = Date.now() - verifyStart;
     logToolResult(verifyCall, verifyResult, verifyDuration);
     commitResult.toolTraces.push({
@@ -280,8 +288,7 @@ export async function runAgent(opts: RunOptions = {}): Promise<AgentLoopResult |
   }
 
   if (commitResult.text) {
-    console.log();
-    console.log(commitResult.text);
+    progress.finishPhase(commitResult.text);
   }
 
   if (commitResult.stopReason !== 'completed') {
@@ -347,4 +354,3 @@ export async function runAgent(opts: RunOptions = {}): Promise<AgentLoopResult |
     stopReason: commitResult.stopReason,
   };
 }
-

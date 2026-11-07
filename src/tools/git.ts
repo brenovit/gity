@@ -3,7 +3,14 @@ import { isAbsolute, join } from 'node:path';
 import { z } from 'zod';
 import { DEFAULT_PULL_STRATEGY, PullStrategySchema, type PullStrategy } from '../config.js';
 import { runCommand, type RunResult } from '../util/spawn.js';
-import { isSecretPath, resolveRepoPath, SECRET_EXCLUDE_PATHSPECS, ToolSafetyError } from './safety.js';
+import {
+  isIgnoredPath,
+  isSecretPath,
+  resolveRepoPath,
+  SECRET_EXCLUDE_PATHSPECS,
+  toIgnoreExcludePathspecs,
+  ToolSafetyError,
+} from './safety.js';
 import { defineTool, type Tool, type ToolContext } from './tool.js';
 
 const GIT_ENV: NodeJS.ProcessEnv = {
@@ -35,13 +42,20 @@ function failure(r: RunResult): { ok: false; output: string } {
 }
 
 /** Validate model-supplied paths and convert them to literal, repo-relative pathspecs. */
-async function toPathspecs(ctx: ToolContext, paths: readonly string[], opts: { allowSecrets: boolean }): Promise<string[]> {
+async function toPathspecs(
+  ctx: ToolContext,
+  paths: readonly string[],
+  opts: { allowSecrets: boolean; allowIgnored?: boolean },
+): Promise<string[]> {
   const specs: string[] = [];
   for (const p of paths) {
     if (p.startsWith(':')) throw new ToolSafetyError(`Pathspec magic is not allowed: ${p}`);
     const { rel } = await resolveRepoPath(ctx.repoRoot, p);
     if (!opts.allowSecrets && isSecretPath(rel)) {
       throw new ToolSafetyError(`Refusing to touch a secret file: ${rel}`);
+    }
+    if (!opts.allowIgnored && isIgnoredPath(rel, ctx.ignorePatterns)) {
+      throw new ToolSafetyError(`Refusing to touch an ignored file (.gityrc): ${rel}`);
     }
     specs.push(`:(literal)${rel}`);
   }
@@ -95,10 +109,10 @@ const NON_IMPERATIVE_VERBS = new Set([
 ]);
 
 /**
- * Validate that a commit message follows Conventional Commits with an imperative subject <= 72 chars.
- * Returns null when valid, or a human-readable error message when invalid.
+ * Validate that a commit message follows the configured commit style (`conventional` by default)
+ * with a subject <= 72 chars. Returns null when valid, or a human-readable error message when invalid.
  */
-export function validateCommitMessage(message: string): string | null {
+export function validateCommitMessage(message: string, commitStyle: string = 'conventional'): string | null {
   const trimmed = message.trim();
   if (trimmed.length === 0) {
     return 'Commit message cannot be empty.';
@@ -111,13 +125,21 @@ export function validateCommitMessage(message: string): string | null {
     return `Commit subject must be <= ${MAX_COMMIT_SUBJECT_LENGTH} characters (got ${subject.length}: "${subject}").`;
   }
 
+  if (subject.endsWith('.')) {
+    return 'Commit subject must not end with a period.';
+  }
+
+  if (lines.length > 1 && (lines[1] ?? '').trim().length > 0) {
+    return 'Commit message must include a blank line between the subject line and body.';
+  }
+
+  if (commitStyle !== 'conventional') {
+    return null;
+  }
+
   const match = CONVENTIONAL_SUBJECT_RE.exec(subject);
   if (!match) {
     return `Commit subject must follow Conventional Commits format "<type>[optional scope]: <imperative subject>" (allowed types: ${CONVENTIONAL_COMMIT_TYPES.join(', ')}).`;
-  }
-
-  if (subject.endsWith('.')) {
-    return 'Commit subject must not end with a period.';
   }
 
   const description = (match[3] ?? '').trim();
@@ -126,17 +148,13 @@ export function validateCommitMessage(message: string): string | null {
     return `Commit subject must use imperative mood (found "${firstWord}" in "${subject}").`;
   }
 
-  if (lines.length > 1 && (lines[1] ?? '').trim().length > 0) {
-    return 'Commit message must include a blank line between the subject line and body.';
-  }
-
   return null;
 }
 
 export const gitStatusTool = defineTool({
   name: 'git_status',
   description:
-    'Show the working tree status (porcelain v1 with branch header). Lists staged, unstaged and untracked files. Secret files are flagged and must never be staged.',
+    'Show the working tree status (porcelain v1 with branch header). Lists staged, unstaged and untracked files. Secret and ignored files are flagged and must never be staged.',
   schema: z.object({}),
   mutating: false,
   async run(_args, ctx) {
@@ -146,7 +164,9 @@ export const gitStatusTool = defineTool({
     const annotated = lines.map((line) => {
       if (line.startsWith('##')) return line;
       const path = line.slice(3).split(' -> ').pop() ?? '';
-      return isSecretPath(path) ? `${line}  [secret: never stage]` : line;
+      if (isSecretPath(path)) return `${line}  [secret: never stage]`;
+      if (isIgnoredPath(path, ctx.ignorePatterns)) return `${line}  [ignored: never stage]`;
+      return line;
     });
     if (annotated.length <= 1) annotated.push('(working tree clean)');
     return { output: annotated.join('\n') };
@@ -156,7 +176,7 @@ export const gitStatusTool = defineTool({
 export const gitDiffTool = defineTool({
   name: 'git_diff',
   description:
-    'Show changes as a unified diff. By default shows unstaged changes; set staged=true for the index. Optionally limit to paths or show a --stat summary. Untracked files are not included; secret files are always excluded.',
+    'Show changes as a unified diff. By default shows unstaged changes; set staged=true for the index. Optionally limit to paths or show a --stat summary. Untracked files are not included; secret and ignored files are always excluded.',
   schema: z.object({
     staged: z.boolean().default(false).describe('Diff the index (staged changes) instead of the working tree'),
     paths: pathList.optional().describe('Limit the diff to these repo-relative paths'),
@@ -165,11 +185,16 @@ export const gitDiffTool = defineTool({
   }),
   mutating: false,
   async run(args, ctx) {
-    const specs = await toPathspecs(ctx, args.paths ?? [], { allowSecrets: false });
+    const specs = await toPathspecs(ctx, args.paths ?? [], { allowSecrets: false, allowIgnored: false });
     const gitArgs = ['diff', '--no-ext-diff', '--no-textconv', `-U${args.context}`];
     if (args.staged) gitArgs.push('--cached');
     if (args.stat) gitArgs.push('--stat');
-    gitArgs.push('--', ...(specs.length > 0 ? specs : ['.']), ...SECRET_EXCLUDE_PATHSPECS);
+    gitArgs.push(
+      '--',
+      ...(specs.length > 0 ? specs : ['.']),
+      ...SECRET_EXCLUDE_PATHSPECS,
+      ...toIgnoreExcludePathspecs(ctx.ignorePatterns),
+    );
     const r = await runGit(ctx, gitArgs);
     if (r.code !== 0) return failure(r);
     return { output: r.stdout.trimEnd() || '(no differences)' };
@@ -185,7 +210,7 @@ export const gitLogTool = defineTool({
   }),
   mutating: false,
   async run(args, ctx) {
-    const specs = await toPathspecs(ctx, args.paths ?? [], { allowSecrets: true });
+    const specs = await toPathspecs(ctx, args.paths ?? [], { allowSecrets: true, allowIgnored: true });
     const gitArgs = ['log', `-n${args.limit}`, '--no-decorate', '--date=short', '--pretty=format:%h %ad %s'];
     if (specs.length > 0) gitArgs.push('--', ...specs);
     const r = await runGit(ctx, gitArgs);
@@ -200,7 +225,7 @@ export const gitLogTool = defineTool({
 export const gitAddTool = defineTool({
   name: 'git_add',
   description:
-    'Stage specific files. Paths must be individual files inside the repo (deleted files allowed); directories, ".", globs and secret files are rejected.',
+    'Stage specific files. Paths must be individual files inside the repo (deleted files allowed); directories, ".", globs, secret files, and .gityrc ignored files are rejected.',
   schema: z.object({
     paths: pathList.min(1).describe('Repo-relative file paths to stage'),
   }),
@@ -212,6 +237,9 @@ export const gitAddTool = defineTool({
       const { abs, rel } = await resolveRepoPath(ctx.repoRoot, p);
       if (rel === '.') throw new ToolSafetyError('Refusing to stage the whole repository; list files explicitly');
       if (isSecretPath(rel)) throw new ToolSafetyError(`Refusing to stage a secret file: ${rel}`);
+      if (isIgnoredPath(rel, ctx.ignorePatterns)) {
+        throw new ToolSafetyError(`Refusing to stage an ignored file (.gityrc): ${rel}`);
+      }
       const stat = await lstat(abs).catch(() => null);
       if (stat?.isDirectory()) throw new ToolSafetyError(`Refusing to stage a directory: ${rel}; list files explicitly`);
       specs.push(`:(literal)${rel}`);
@@ -226,7 +254,7 @@ export const gitAddTool = defineTool({
 export const gitCommitTool = defineTool({
   name: 'git_commit',
   description:
-    'Create a commit from the currently staged changes with the given message (Conventional Commits format, imperative subject <= 72 chars). Fails if nothing is staged or a secret file is staged.',
+    'Create a commit from the currently staged changes with the given message (Conventional Commits format, imperative subject <= 72 chars). Fails if nothing is staged or a secret/ignored file is staged.',
   schema: z.object({
     message: z
       .string()
@@ -237,7 +265,7 @@ export const gitCommitTool = defineTool({
   }),
   mutating: true,
   async run(args, ctx) {
-    const messageError = validateCommitMessage(args.message);
+    const messageError = validateCommitMessage(args.message, ctx.commitStyle ?? 'conventional');
     if (messageError) {
       return { ok: false, output: `Invalid commit message: ${messageError}` };
     }
@@ -248,6 +276,10 @@ export const gitCommitTool = defineTool({
     const secrets = files.filter(isSecretPath);
     if (secrets.length > 0) {
       throw new ToolSafetyError(`Secret files are staged, refusing to commit: ${secrets.join(', ')}`);
+    }
+    const ignored = files.filter((f) => isIgnoredPath(f, ctx.ignorePatterns));
+    if (ignored.length > 0) {
+      throw new ToolSafetyError(`Ignored files (.gityrc) are staged, refusing to commit: ${ignored.join(', ')}`);
     }
     const r = await runGit(ctx, ['commit', '-m', args.message], 60_000);
     if (r.code !== 0) return failure(r);

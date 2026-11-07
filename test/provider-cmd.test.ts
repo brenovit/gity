@@ -1,10 +1,22 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { providerTest } from '../src/commands/provider.js';
 import { addProvider, buildProfile, defaultConfig, saveConfig } from '../src/config.js';
 
 describe('providerTest command', () => {
+  let tmpDir: string;
+
   beforeEach(async () => {
     process.exitCode = undefined;
+    tmpDir = await mkdtemp(join(tmpdir(), 'gity-provider-cmd-'));
+    process.env.GITY_CONFIG = join(tmpDir, 'config.json');
+  });
+
+  afterEach(async () => {
+    delete process.env.GITY_CONFIG;
+    await rm(tmpDir, { recursive: true, force: true });
   });
 
   it('runs connection check and chat test', async () => {

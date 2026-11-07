@@ -139,7 +139,7 @@ interface Provider {
 - Flag `--no-pull` to skip
 - On conflicts: stop, report clearly, leave repo in safe state
 
-### Stage 8: Polish
+### Stage 8: Polish ✅
 - Streaming output / spinner with live tool-call logging (`-v` for verbose)
 - `--provider <name>` and `--model <name>` per-run overrides
 - Timeouts (via `AbortSignal`), retries with backoff for network errors

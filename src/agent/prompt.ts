@@ -71,11 +71,55 @@ Your job is to execute an approved commit plan by staging specific files and cre
    - Separate an optional commit body from the subject line with a blank line.
 5. When all commits have been created and verified with \`git_status\`, stop calling tools and output a concise summary of the commits created.`;
 
-/** Build the user prompt for executing the approved (or user-edited) commit plan. */
-export function buildCommitUserPrompt(editedPlan?: string): string {
-  if (editedPlan && editedPlan.trim().length > 0) {
-    return `The user edited the commit plan / instructions. Execute the commits following these updated instructions:\n\n${editedPlan.trim()}\n\nFor each commit, stage specific file paths with git_add, commit with git_commit using Conventional Commits format (imperative subject <= 72 chars), and verify with git_status after each commit.`;
+export interface PromptStyleOptions {
+  commitStyle?: string;
+  ignorePatterns?: readonly string[];
+}
+
+function buildStyleGuidance(commitStyle: string = 'conventional'): string {
+  if (commitStyle === 'conventional') {
+    return `- **Conventional Commits**: Use \`<type>(<optional scope>): <imperative subject>\` (types: \`feat\`, \`fix\`, \`refactor\`, \`docs\`, \`test\`, \`chore\`, \`perf\`, \`build\`, \`ci\`, \`style\`, \`revert\`).
+  - Subject line MUST be imperative mood, <= 72 characters, no trailing period.
+  - Include a brief body (separated by a blank line) when extra context or motivation is helpful.`;
   }
-  return 'The user approved the commit plan. Proceed to stage the specific file paths with git_add, create each commit in order with git_commit using Conventional Commits format (imperative subject <= 72 chars), and verify with git_status after each commit.';
+  if (commitStyle === 'freeform') {
+    return `- **Commit Style (freeform)**: Write a clear, concise imperative subject line (<= 72 characters, no trailing period) matching the repository's git log conventions. A Conventional Commits type prefix is not required.`;
+  }
+  return `- **Commit Style (${commitStyle})**: Follow this style requirement: ${commitStyle}. Subject line MUST be <= 72 characters with no trailing period.`;
+}
+
+function buildIgnoreGuidance(ignorePatterns?: readonly string[]): string {
+  if (!ignorePatterns || ignorePatterns.length === 0) return '';
+  return `\n- **Ignore patterns (.gityrc)**: Never include or stage files matching these patterns: ${ignorePatterns.map((p) => `\`${p}\``).join(', ')}.`;
+}
+
+/** Build the system prompt for read-only analysis, incorporating optional `.gityrc` overrides. */
+export function buildReadOnlySystemPrompt(options: PromptStyleOptions = {}): string {
+  const style = options.commitStyle ?? 'conventional';
+  if (style === 'conventional' && (!options.ignorePatterns || options.ignorePatterns.length === 0)) {
+    return READ_ONLY_SYSTEM_PROMPT;
+  }
+  return `${READ_ONLY_SYSTEM_PROMPT}\n\n## Repository Overrides (.gityrc)\n${buildStyleGuidance(style)}${buildIgnoreGuidance(options.ignorePatterns)}`;
+}
+
+/** Build the system prompt for commit execution, incorporating optional `.gityrc` overrides. */
+export function buildCommitSystemPrompt(options: PromptStyleOptions = {}): string {
+  const style = options.commitStyle ?? 'conventional';
+  if (style === 'conventional' && (!options.ignorePatterns || options.ignorePatterns.length === 0)) {
+    return COMMIT_SYSTEM_PROMPT;
+  }
+  return `${COMMIT_SYSTEM_PROMPT}\n\n## Repository Overrides (.gityrc)\n${buildStyleGuidance(style)}${buildIgnoreGuidance(options.ignorePatterns)}`;
+}
+
+/** Build the user prompt for executing the approved (or user-edited) commit plan. */
+export function buildCommitUserPrompt(editedPlan?: string, commitStyle: string = 'conventional'): string {
+  const styleDesc =
+    commitStyle === 'conventional'
+      ? 'Conventional Commits format (imperative subject <= 72 chars)'
+      : `${commitStyle} commit style (subject <= 72 chars)`;
+  if (editedPlan && editedPlan.trim().length > 0) {
+    return `The user edited the commit plan / instructions. Execute the commits following these updated instructions:\n\n${editedPlan.trim()}\n\nFor each commit, stage specific file paths with git_add, commit with git_commit using ${styleDesc}, and verify with git_status after each commit.`;
+  }
+  return `The user approved the commit plan. Proceed to stage the specific file paths with git_add, create each commit in order with git_commit using ${styleDesc}, and verify with git_status after each commit.`;
 }
 

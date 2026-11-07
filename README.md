@@ -91,6 +91,7 @@ Shows what commits would be created (grouped files and Conventional Commit messa
 | `gity provider test [name]` | Test provider connectivity and chat reply latency |
 | `gity config show` | Show config (secrets masked) |
 | `gity config path` | Print config file path |
+| `gity doctor [-p <name>]` | Check Node.js, git, repo, `.gityrc`, config, and provider connectivity |
 | `gity run [options]` | Run the commit agent |
 | `gity run --dry-run` | Preview commits without changes |
 | `gity run --yes` | Skip confirmation prompts |
@@ -100,6 +101,26 @@ Shows what commits would be created (grouped files and Conventional Commit messa
 | `gity run --model <name>` | Override model for this run |
 | `gity run --max-iterations <n>` | Cap agent tool-calling turns (default 15) |
 | `gity run -v, --verbose` | Show tool call timing and status |
+
+## Per-Repository `.gityrc`
+
+You can place an optional `.gityrc` JSON file in the root of any git repository to override settings per repo:
+
+```json
+{
+  "provider": "claude",
+  "model": "claude-sonnet-4-5",
+  "commitStyle": "conventional",
+  "ignore": ["dist/**", "*.snap"],
+  "pullStrategy": "rebase-autostash"
+}
+```
+
+- `provider`: Default provider profile name for this repo (overridden by `--provider`)
+- `model`: Model override for this repo (overridden by `--model`)
+- `commitStyle`: `"conventional"` (default), `"freeform"`, or custom style instructions
+- `ignore`: Glob/path patterns to exclude from staging, diffs, grep, and bash inspection
+- `pullStrategy`: Override the pull strategy for this repo
 
 ## Configuration
 

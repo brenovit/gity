@@ -42,9 +42,14 @@ export interface AgentLoopOptions {
   maxTotalChars?: number;
   /** Per-tool output character cap (defaults to tool safety default of 20k). */
   maxToolOutputChars?: number;
+  /** Optional `.gityrc` ignore patterns to exclude from staging and analysis. */
+  ignorePatterns?: readonly string[];
+  /** Optional `.gityrc` commit style (`conventional`, `freeform`, or custom). */
+  commitStyle?: string;
   signal?: AbortSignal;
   onToolCall?: (call: ToolCall, iteration: number) => void;
   onToolResult?: (call: ToolCall, result: ToolResult, durationMs: number) => void;
+  onTextDelta?: (delta: string) => void;
 }
 
 export interface AgentLoopResult {
@@ -122,6 +127,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         messages,
         tools: toolSpecs,
         signal: stepSignal,
+        onTextDelta: options.onTextDelta,
       });
     } catch (err) {
       if (options.signal?.aborted) {
@@ -161,6 +167,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         {
           repoRoot: options.repoRoot,
           maxOutputChars: options.maxToolOutputChars,
+          ignorePatterns: options.ignorePatterns,
+          commitStyle: options.commitStyle,
           signal: stepSignal,
         },
         tools,

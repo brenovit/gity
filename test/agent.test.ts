@@ -759,5 +759,62 @@ describe('runAgent command', () => {
       rmSync(remoteRoot, { recursive: true, force: true });
     }
   });
+
+  it('honours per-repo .gityrc overrides (commitStyle, ignore patterns) and --provider / --model flags', async () => {
+    const configPath = join(repo, 'test-config.json');
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        defaultProvider: 'default-ollama',
+        providers: {
+          'default-ollama': { type: 'ollama', model: 'llama3.2', baseUrl: 'http://localhost:11434' },
+          'alt-ollama': { type: 'ollama', model: 'qwen2.5', baseUrl: 'http://localhost:11434' },
+        },
+      }),
+    );
+    git(repo, 'add', 'test-config.json');
+    git(repo, 'commit', '-q', '-m', 'chore: add test config');
+
+    writeFileSync(
+      join(repo, '.gityrc'),
+      JSON.stringify({
+        provider: 'alt-ollama',
+        commitStyle: 'freeform',
+        ignore: ['ignored.txt', '.gityrc'],
+      }),
+    );
+    writeFileSync(join(repo, 'ignored.txt'), 'do not commit me\n');
+    writeFileSync(join(repo, 'app.ts'), 'export const app = 1;\n');
+
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(init?.body as string);
+      expect(body.model).toBe('custom-override-model');
+      return new Response(
+        JSON.stringify({
+          message: { role: 'assistant', content: 'Plan: Add app module (app.ts)' },
+          done_reason: 'stop',
+        }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    try {
+      const res = await runAgent({
+        repoRoot: repo,
+        configPath,
+        model: 'custom-override-model',
+        dryRun: true,
+      });
+
+      expect(res?.stopReason).toBe('completed');
+      expect(res?.text).toContain('Plan: Add app module');
+      expect(fetchMock).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 

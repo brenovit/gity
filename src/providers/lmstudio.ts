@@ -3,6 +3,7 @@ import type { LmStudioProfile } from '../config.js';
 import { getApiKey } from '../config.js';
 import type { ChatInput, ChatResult, Message, Provider, ToolCall } from '../types.js';
 import { ProviderError } from './errors.js';
+import { fetchWithRetry, type HttpRequestOptions } from './http.js';
 
 const OpenAiToolCallSchema = z.object({
   id: z.string().optional(),
@@ -88,17 +89,17 @@ export class LmStudioProvider implements Provider {
   private readonly baseUrl: string;
   private readonly model: string;
   private readonly apiKey?: string;
-  private readonly fetchFn: typeof fetch;
+  private readonly httpOptions: HttpRequestOptions;
 
   constructor(
     profile: LmStudioProfile,
-    options: { fetchFn?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+    options: HttpRequestOptions & { env?: NodeJS.ProcessEnv } = {},
   ) {
     this.name = `lmstudio:${profile.model}`;
     this.baseUrl = profile.baseUrl.replace(/\/+$/, '');
     this.model = profile.model;
     this.apiKey = getApiKey(profile, options.env);
-    this.fetchFn = options.fetchFn ?? fetch;
+    this.httpOptions = options;
   }
 
   async chat(input: ChatInput): Promise<ChatResult> {
@@ -131,18 +132,19 @@ export class LmStudioProvider implements Provider {
       headers['Authorization'] = `Bearer ${this.apiKey}`;
     }
 
-    let res: Response;
-    try {
-      res = await this.fetchFn(url, {
+    const res = await fetchWithRetry(
+      url,
+      {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
+      },
+      {
+        ...this.httpOptions,
+        providerLabel: 'LM Studio',
         signal: input.signal,
-      });
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') throw err;
-      throw new ProviderError(`Failed to connect to LM Studio at ${url}: ${err instanceof Error ? err.message : String(err)}`);
-    }
+      },
+    );
 
     if (!res.ok) {
       let errMsg = `HTTP ${res.status} ${res.statusText}`;
@@ -181,6 +183,11 @@ export class LmStudioProvider implements Provider {
     }
 
     const { message, finish_reason } = choice;
+    const text = message.content ?? '';
+    if (text && input.onTextDelta) {
+      input.onTextDelta(text);
+    }
+
     const toolCalls: ToolCall[] = (message.tool_calls ?? []).map((tc, index) => ({
       id: tc.id || `call_${index}_${Math.random().toString(36).slice(2, 9)}`,
       name: tc.function.name,
@@ -195,7 +202,7 @@ export class LmStudioProvider implements Provider {
     }
 
     return {
-      text: message.content ?? '',
+      text,
       toolCalls,
       stopReason,
     };

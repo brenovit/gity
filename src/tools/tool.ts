@@ -6,6 +6,10 @@ export interface ToolContext {
   repoRoot: string;
   /** Max characters of output returned to the model (default 20k). */
   maxOutputChars?: number;
+  /** Optional `.gityrc` ignore patterns to exclude from staging and analysis. */
+  ignorePatterns?: readonly string[];
+  /** Optional `.gityrc` commit style (`conventional`, `freeform`, or custom). */
+  commitStyle?: string;
   signal?: AbortSignal;
 }
 

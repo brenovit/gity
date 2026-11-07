@@ -3,6 +3,7 @@ import type { GeminiProfile } from '../config.js';
 import { getApiKey } from '../config.js';
 import type { ChatInput, ChatResult, Message, Provider, ToolCall } from '../types.js';
 import { ProviderError } from './errors.js';
+import { fetchWithRetry, type HttpRequestOptions } from './http.js';
 
 const GeminiFunctionCallSchema = z.object({
   name: z.string(),
@@ -99,18 +100,18 @@ export class GeminiProvider implements Provider {
   private readonly model: string;
   private readonly apiKeyEnv: string;
   private readonly apiKey?: string;
-  private readonly fetchFn: typeof fetch;
+  private readonly httpOptions: HttpRequestOptions;
 
   constructor(
     profile: GeminiProfile,
-    options: { fetchFn?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+    options: HttpRequestOptions & { env?: NodeJS.ProcessEnv } = {},
   ) {
     this.name = `gemini:${profile.model}`;
     this.baseUrl = profile.baseUrl.replace(/\/+$/, '');
     this.model = profile.model.replace(/^models\//, '');
     this.apiKeyEnv = profile.apiKeyEnv;
     this.apiKey = getApiKey(profile, options.env);
-    this.fetchFn = options.fetchFn ?? fetch;
+    this.httpOptions = options;
   }
 
   async chat(input: ChatInput): Promise<ChatResult> {
@@ -143,9 +144,9 @@ export class GeminiProvider implements Provider {
       ];
     }
 
-    let res: Response;
-    try {
-      res = await this.fetchFn(url, {
+    const res = await fetchWithRetry(
+      url,
+      {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -153,12 +154,13 @@ export class GeminiProvider implements Provider {
           'x-goog-api-key': this.apiKey,
         },
         body: JSON.stringify(body),
+      },
+      {
+        ...this.httpOptions,
+        providerLabel: 'Gemini',
         signal: input.signal,
-      });
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') throw err;
-      throw new ProviderError(`Failed to connect to Gemini at ${url}: ${err instanceof Error ? err.message : String(err)}`);
-    }
+      },
+    );
 
     if (!res.ok) {
       let errMsg = `HTTP ${res.status} ${res.statusText}`;
@@ -202,6 +204,7 @@ export class GeminiProvider implements Provider {
     for (const part of candidate.content?.parts ?? []) {
       if (part.text) {
         text += part.text;
+        input.onTextDelta?.(part.text);
       }
       if (part.functionCall) {
         toolCalls.push({

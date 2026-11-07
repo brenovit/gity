@@ -11,7 +11,7 @@ import {
   validateCommitMessage,
 } from '../src/tools/git.js';
 import { runTool, toToolSpecs } from '../src/tools/index.js';
-import { isInside, isSecretPath, resolveRepoPath, truncate } from '../src/tools/safety.js';
+import { isIgnoredPath, isInside, isSecretPath, resolveRepoPath, truncate } from '../src/tools/safety.js';
 import type { ToolContext } from '../src/tools/tool.js';
 
 function git(cwd: string, ...args: string[]): string {
@@ -98,6 +98,49 @@ describe('safety: secret files', () => {
   it.each(['README.md', 'src/env.ts', 'keyboard.ts', 'docs/pem-format.md'])('does not flag %s', (p) =>
     expect(isSecretPath(p)).toBe(false),
   );
+
+  it('matches .gityrc ignore patterns (globs, directories, basenames)', () => {
+    const patterns = ['dist/**', '*.snap', 'docs/generated'];
+    expect(isIgnoredPath('dist/bundle.js', patterns)).toBe(true);
+    expect(isIgnoredPath('dist/sub/a.js', patterns)).toBe(true);
+    expect(isIgnoredPath('test/foo.snap', patterns)).toBe(true);
+    expect(isIgnoredPath('foo.snap', patterns)).toBe(true);
+    expect(isIgnoredPath('docs/generated/index.md', patterns)).toBe(true);
+    expect(isIgnoredPath('src/index.ts', patterns)).toBe(false);
+    expect(isIgnoredPath('docs/guide.md', patterns)).toBe(false);
+  });
+
+  it('git_status flags ignored files and git_add / bash / grep refuse them', async () => {
+    mkdirSync(join(repo, 'dist'));
+    writeFileSync(join(repo, 'dist', 'out.js'), 'bundle\n');
+    writeFileSync(join(repo, 'src.snap'), 'snapshot\n');
+    const ignoreCtx: ToolContext = { repoRoot: repo, ignorePatterns: ['dist/**', '*.snap'] };
+
+    const st = await runTool('git_status', {}, ignoreCtx);
+    expect(st.output).toContain('[ignored: never stage]');
+
+    const addDist = await runTool('git_add', { paths: ['dist/out.js'] }, ignoreCtx);
+    expect(addDist.ok).toBe(false);
+    expect(addDist.output).toMatch(/Blocked: .*ignored/);
+
+    const bashSnap = await runTool('bash', { command: 'cat src.snap' }, ignoreCtx);
+    expect(bashSnap.ok).toBe(false);
+    expect(bashSnap.output).toMatch(/Blocked: .*ignored/);
+
+    const grepRes = await runTool('grep', { pattern: 'bundle' }, ignoreCtx);
+    expect(grepRes.output).not.toContain('dist/out.js');
+  });
+
+  it('git_commit respects freeform commitStyle override from .gityrc', async () => {
+    expect(validateCommitMessage('Update README documentation', 'freeform')).toBeNull();
+    expect(validateCommitMessage('Update README documentation.', 'freeform')).toMatch(/period/);
+
+    writeFileSync(join(repo, 'README.md'), '# Freeform\n');
+    const freeformCtx: ToolContext = { repoRoot: repo, commitStyle: 'freeform' };
+    await runTool('git_add', { paths: ['README.md'] }, freeformCtx);
+    const commit = await runTool('git_commit', { message: 'Update README documentation' }, freeformCtx);
+    expect(commit.ok).toBe(true);
+  });
 });
 
 describe('bash: tokenizer and forbidden commands', () => {

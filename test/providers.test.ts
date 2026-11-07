@@ -566,3 +566,110 @@ describe('GeminiProvider', () => {
     );
   });
 });
+
+describe('HTTP timeouts, retries with backoff, and streaming', () => {
+  it('retries with exponential backoff on transient network errors and succeeds', async () => {
+    const profile = buildProfile({ type: 'ollama', model: 'llama3.2' });
+    let attempts = 0;
+    const delays: number[] = [];
+
+    const fetchFn = vi.fn<typeof fetch>(async () => {
+      attempts++;
+      if (attempts < 3) {
+        throw new TypeError('fetch failed: ECONNRESET');
+      }
+      return new Response(
+        JSON.stringify({ message: { role: 'assistant', content: 'recovered' }, done_reason: 'stop' }),
+        { status: 200 },
+      );
+    });
+
+    const provider = new OllamaProvider(profile, {
+      fetchFn,
+      maxRetries: 2,
+      retryDelayMs: 100,
+      sleepFn: async (ms) => {
+        delays.push(ms);
+      },
+    });
+
+    const res = await provider.chat({ messages: [{ role: 'user', content: 'ping' }] });
+    expect(res.text).toBe('recovered');
+    expect(attempts).toBe(3);
+    expect(delays).toEqual([100, 200]);
+  });
+
+  it('retries on 503 status codes and fails after exhausting retries', async () => {
+    const profile = buildProfile({ type: 'claude', model: 'claude-3-5' });
+    const delays: number[] = [];
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(JSON.stringify({ error: { message: 'overloaded' } }), { status: 503 }),
+    );
+
+    const provider = new ClaudeProvider(profile, {
+      fetchFn,
+      env: { ANTHROPIC_API_KEY: 'sk-test' },
+      maxRetries: 2,
+      retryDelayMs: 50,
+      sleepFn: async (ms) => {
+        delays.push(ms);
+      },
+    });
+
+    await expect(provider.chat({ messages: [{ role: 'user', content: 'ping' }] })).rejects.toThrow(
+      'Claude error: overloaded',
+    );
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+    expect(delays).toEqual([50, 100]);
+  });
+
+  it('aborts request when per-request timeoutMs elapses via AbortSignal', async () => {
+    const profile = buildProfile({ type: 'ollama', model: 'llama3.2' });
+    const fetchFn = vi.fn<typeof fetch>(async (_url, init) => {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, 200);
+        init?.signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(init.signal?.reason ?? Object.assign(new Error('Timed out'), { name: 'TimeoutError' }));
+        });
+      });
+      return new Response('{}', { status: 200 });
+    });
+
+    const provider = new OllamaProvider(profile, {
+      fetchFn,
+      timeoutMs: 20,
+      maxRetries: 0,
+    });
+
+    await expect(provider.chat({ messages: [{ role: 'user', content: 'ping' }] })).rejects.toThrow(/timed out/i);
+  });
+
+  it('streams text deltas from Ollama NDJSON responses when onTextDelta is provided', async () => {
+    const profile = buildProfile({ type: 'ollama', model: 'llama3.2' });
+    const ndjson = [
+      JSON.stringify({ message: { role: 'assistant', content: 'Hello ' }, done: false }),
+      JSON.stringify({ message: { role: 'assistant', content: 'world!' }, done: true, done_reason: 'stop' }),
+    ].join('\n');
+
+    const fetchFn = vi.fn<typeof fetch>(
+      async () =>
+        new Response(ndjson, {
+          status: 200,
+          headers: { 'Content-Type': 'application/x-ndjson' },
+        }),
+    );
+
+    const provider = new OllamaProvider(profile, { fetchFn });
+    const deltas: string[] = [];
+    const res = await provider.chat({
+      messages: [{ role: 'user', content: 'hi' }],
+      onTextDelta: (d) => deltas.push(d),
+    });
+
+    expect(res.text).toBe('Hello world!');
+    expect(deltas).toEqual(['Hello ', 'world!']);
+    const sent = JSON.parse(fetchFn.mock.calls[0]![1]?.body as string);
+    expect(sent.stream).toBe(true);
+  });
+});

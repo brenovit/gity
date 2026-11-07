@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { runCommand } from '../util/spawn.js';
-import { isSecretPath, resolveRepoPath, ToolSafetyError } from './safety.js';
+import { isIgnoredPath, isSecretPath, resolveRepoPath, ToolSafetyError } from './safety.js';
 import { defineTool } from './tool.js';
 
 export const ALLOWED_COMMANDS = ['ls', 'cat', 'head', 'tail', 'wc', 'file', 'pwd', 'tree'] as const;
@@ -92,8 +92,12 @@ export interface CheckedCommand {
   args: string[];
 }
 
-/** Parse and validate a command line against the allowlist and repo/secret path rules. */
-export async function checkCommand(command: string, repoRoot: string): Promise<CheckedCommand> {
+/** Parse and validate a command line against the allowlist and repo/secret/ignore path rules. */
+export async function checkCommand(
+  command: string,
+  repoRoot: string,
+  ignorePatterns?: readonly string[],
+): Promise<CheckedCommand> {
   const tokens = tokenize(command.trim());
   const [cmd, ...args] = tokens;
   if (cmd === undefined) throw new ToolSafetyError('Empty command');
@@ -111,9 +115,12 @@ export async function checkCommand(command: string, repoRoot: string): Promise<C
       if (bad !== undefined) throw new ToolSafetyError(`Option -${bad} is not allowed for ${cmd}`);
       continue;
     }
-    // Every operand (including option values) must be a path inside the repo and not a secret.
+    // Every operand (including option values) must be a path inside the repo and not a secret or ignored file.
     const { rel } = await resolveRepoPath(repoRoot, arg);
     if (isSecretPath(rel)) throw new ToolSafetyError(`Refusing to access a secret file: ${rel}`);
+    if (isIgnoredPath(rel, ignorePatterns)) {
+      throw new ToolSafetyError(`Refusing to access an ignored file (.gityrc): ${rel}`);
+    }
   }
 
   return { cmd, args };
@@ -121,13 +128,13 @@ export async function checkCommand(command: string, repoRoot: string): Promise<C
 
 export const bashTool = defineTool({
   name: 'bash',
-  description: `Run a single read-only command in the repo root. Allowed: ${ALLOWED_COMMANDS.join(', ')}. No pipes, redirects, chaining, globbing or subshells; paths must stay inside the repo; secret files are blocked.`,
+  description: `Run a single read-only command in the repo root. Allowed: ${ALLOWED_COMMANDS.join(', ')}. No pipes, redirects, chaining, globbing or subshells; paths must stay inside the repo; secret and ignored files are blocked.`,
   schema: z.object({
     command: z.string().min(1).max(1000).describe('e.g. "cat src/index.ts" or "head -n 40 README.md"'),
   }),
   mutating: false,
   async run(args, ctx) {
-    const { cmd, args: argv } = await checkCommand(args.command, ctx.repoRoot);
+    const { cmd, args: argv } = await checkCommand(args.command, ctx.repoRoot, ctx.ignorePatterns);
     let r;
     try {
       r = await runCommand(cmd, argv, { cwd: ctx.repoRoot, timeoutMs: 10_000, maxBytes: 1024 * 1024, signal: ctx.signal });

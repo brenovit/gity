@@ -11,6 +11,7 @@ import {
   type ProviderAddOptions,
 } from '../commands/provider.js';
 import { configPath, configShow } from '../commands/config.js';
+import { runDoctor } from '../commands/doctor.js';
 import { runAgent, type RunOptions } from '../commands/run.js';
 import { toolsDebug, type ToolsDebugOptions } from '../commands/tools.js';
 
@@ -29,10 +30,10 @@ program
   .option('--max-iterations <n>', 'Maximum agent tool-calling iterations (default 15)')
   .option('-v, --verbose', 'Show detailed tool call timing and status');
 
-// Default action: run agent when --dry-run or --yes is passed; otherwise show repo status
+// Default action: run agent when --dry-run, --yes, --provider, or --model is passed; otherwise show repo status
 program.action(async (opts: RunOptions) => {
   try {
-    if (opts.dryRun || opts.yes) {
+    if (opts.dryRun || opts.yes || opts.provider || opts.model) {
       await runAgent(opts);
       return;
     }
@@ -100,6 +101,18 @@ program
   .command('setup')
   .description('Run the interactive provider setup wizard')
   .action(handle(runSetup));
+
+// gity doctor — diagnostic checks
+program
+  .command('doctor')
+  .description('Check Node.js, git, repo, config, .gityrc, and provider connectivity')
+  .option('-p, --provider <name>', 'Provider profile to check')
+  .action(
+    handle((opts: { provider?: string }) => {
+      const rootOpts = program.opts<{ provider?: string }>();
+      return runDoctor({ provider: opts.provider ?? rootOpts.provider }).then(() => undefined);
+    }),
+  );
 
 // gity provider — provider management
 const providerCmd = program.command('provider').description('Manage provider profiles');

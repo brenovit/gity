@@ -3,6 +3,7 @@ import type { ClaudeProfile } from '../config.js';
 import { getApiKey } from '../config.js';
 import type { ChatInput, ChatResult, Message, Provider, ToolCall } from '../types.js';
 import { ProviderError } from './errors.js';
+import { fetchWithRetry, type HttpRequestOptions } from './http.js';
 
 const ClaudeContentBlockSchema = z.discriminatedUnion('type', [
   z.object({
@@ -112,18 +113,18 @@ export class ClaudeProvider implements Provider {
   private readonly model: string;
   private readonly apiKeyEnv: string;
   private readonly apiKey?: string;
-  private readonly fetchFn: typeof fetch;
+  private readonly httpOptions: HttpRequestOptions;
 
   constructor(
     profile: ClaudeProfile,
-    options: { fetchFn?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+    options: HttpRequestOptions & { env?: NodeJS.ProcessEnv } = {},
   ) {
     this.name = `claude:${profile.model}`;
     this.baseUrl = profile.baseUrl.replace(/\/+$/, '');
     this.model = profile.model;
     this.apiKeyEnv = profile.apiKeyEnv;
     this.apiKey = getApiKey(profile, options.env);
-    this.fetchFn = options.fetchFn ?? fetch;
+    this.httpOptions = options;
   }
 
   async chat(input: ChatInput): Promise<ChatResult> {
@@ -152,9 +153,9 @@ export class ClaudeProvider implements Provider {
       }));
     }
 
-    let res: Response;
-    try {
-      res = await this.fetchFn(url, {
+    const res = await fetchWithRetry(
+      url,
+      {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -163,12 +164,13 @@ export class ClaudeProvider implements Provider {
           'anthropic-version': '2023-06-01',
         },
         body: JSON.stringify(body),
+      },
+      {
+        ...this.httpOptions,
+        providerLabel: 'Claude',
         signal: input.signal,
-      });
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') throw err;
-      throw new ProviderError(`Failed to connect to Claude at ${url}: ${err instanceof Error ? err.message : String(err)}`);
-    }
+      },
+    );
 
     if (!res.ok) {
       let errMsg = `HTTP ${res.status} ${res.statusText}`;
@@ -203,6 +205,7 @@ export class ClaudeProvider implements Provider {
     for (const block of parsed.data.content) {
       if (block.type === 'text') {
         text += block.text;
+        input.onTextDelta?.(block.text);
       } else if (block.type === 'tool_use') {
         toolCalls.push({
           id: block.id,

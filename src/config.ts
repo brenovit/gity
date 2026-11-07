@@ -101,6 +101,26 @@ export function parsePullStrategy(value: string): PullStrategy {
   return result.data;
 }
 
+/** Supported commit message styles in per-repo `.gityrc`. */
+export const CommitStyleSchema = z.enum(['conventional', 'freeform']);
+export type CommitStyle = z.infer<typeof CommitStyleSchema>;
+export const DEFAULT_COMMIT_STYLE: CommitStyle = 'conventional';
+
+/** Per-repository `.gityrc` override schema. */
+export const RepoConfigSchema = z.object({
+  /** Provider profile name override for this repository. */
+  provider: ProviderNameSchema.optional(),
+  /** Model override for this repository. */
+  model: modelField.optional(),
+  /** Commit message style: `conventional` (default) or `freeform`, or custom style instructions. */
+  commitStyle: z.union([CommitStyleSchema, z.string().trim().min(1)]).optional(),
+  /** Glob or path patterns to ignore when staging or analyzing changes. */
+  ignore: z.array(z.string().trim().min(1)).default([]),
+  /** Pull strategy override for this repository. */
+  pullStrategy: PullStrategySchema.optional(),
+});
+export type RepoConfig = z.infer<typeof RepoConfigSchema>;
+
 /** Full config schema. */
 export const ConfigSchema = z
   .object({
@@ -119,6 +139,40 @@ export type Config = z.infer<typeof ConfigSchema>;
 
 export function defaultConfig(): Config {
   return { providers: {} };
+}
+
+export function defaultRepoConfig(): RepoConfig {
+  return { ignore: [] };
+}
+
+/** Path to the per-repository `.gityrc` file inside `repoRoot`. */
+export function getRepoConfigPath(repoRoot: string): string {
+  return join(repoRoot, '.gityrc');
+}
+
+/** Load per-repo `.gityrc` from `repoRoot`. Missing file → defaults. Invalid file → ConfigError. */
+export async function loadRepoConfig(repoRoot: string): Promise<RepoConfig> {
+  const path = getRepoConfigPath(repoRoot);
+  let raw: string;
+  try {
+    raw = await readFile(path, 'utf-8');
+  } catch (err) {
+    if (err instanceof Error && 'code' in err && err.code === 'ENOENT') return defaultRepoConfig();
+    throw err;
+  }
+
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    throw new ConfigError(`.gityrc is not valid JSON: ${path}`);
+  }
+
+  const result = RepoConfigSchema.safeParse(json);
+  if (!result.success) {
+    throw new ConfigError(`Invalid .gityrc at ${path}:\n${formatIssues(result.error)}`);
+  }
+  return result.data;
 }
 
 /** Config file path: `$GITY_CONFIG` > `$XDG_CONFIG_HOME/gity/config.json` > `~/.config/gity/config.json`. */

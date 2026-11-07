@@ -104,3 +104,67 @@ export const SECRET_EXCLUDE_PATHSPECS: readonly string[] = [
   ':(exclude,glob,icase)**/id_ecdsa*',
   ':(exclude,glob,icase)**/id_ed25519*',
 ];
+
+function globToRegExp(pattern: string): RegExp {
+  const normalized = pattern.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+  let regexStr = '^';
+  for (let i = 0; i < normalized.length; i++) {
+    const ch = normalized[i]!;
+    if (ch === '*') {
+      if (normalized[i + 1] === '*') {
+        if (normalized[i + 2] === '/') {
+          regexStr += '(?:.*/)?';
+          i += 2;
+        } else {
+          regexStr += '.*';
+          i += 1;
+        }
+      } else {
+        regexStr += '[^/]*';
+      }
+    } else if (ch === '?') {
+      regexStr += '[^/]';
+    } else if ('+^$()[]{}|.\\'.includes(ch)) {
+      regexStr += `\\${ch}`;
+    } else {
+      regexStr += ch;
+    }
+  }
+  regexStr += '(?:$|/.*$)';
+  return new RegExp(regexStr);
+}
+
+/**
+ * True if repo-relative path `p` matches any `.gityrc` ignore pattern.
+ * Patterns without slashes match both against the full relative path and against basenames.
+ */
+export function isIgnoredPath(p: string, patterns: readonly string[] | undefined): boolean {
+  if (!patterns || patterns.length === 0) return false;
+  const normalized = p.replace(/\\/g, '/').replace(/^\.\/+/, '').replace(/^\/+|\/+$/g, '');
+  if (!normalized) return false;
+  const base = normalized.split('/').pop() ?? '';
+
+  for (const raw of patterns) {
+    const pat = raw.trim().replace(/\\/g, '/').replace(/^\.\/+/, '').replace(/^\/+|\/+$/g, '');
+    if (!pat) continue;
+    const re = globToRegExp(pat);
+    if (re.test(normalized)) return true;
+    if (!pat.includes('/') && re.test(base)) return true;
+  }
+  return false;
+}
+
+/** Build git exclude pathspecs for `.gityrc` ignore patterns. */
+export function toIgnoreExcludePathspecs(patterns: readonly string[] | undefined): string[] {
+  if (!patterns || patterns.length === 0) return [];
+  const specs: string[] = [];
+  for (const raw of patterns) {
+    const pat = raw.trim().replace(/\\/g, '/').replace(/^\.\/+/, '').replace(/^\/+|\/+$/g, '');
+    if (!pat) continue;
+    specs.push(`:(exclude,glob)${pat}`);
+    if (!pat.includes('/')) {
+      specs.push(`:(exclude,glob)**/${pat}`);
+    }
+  }
+  return specs;
+}

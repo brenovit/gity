@@ -11,9 +11,11 @@ import {
   describeApiKey,
   getConfigPath,
   loadConfig,
+  loadRepoConfig,
   maskSecret,
   parsePullStrategy,
   removeProvider,
+  RepoConfigSchema,
   resolveProvider,
   saveConfig,
   setDefaultProvider,
@@ -156,5 +158,34 @@ describe('load / save', () => {
   it('honours GITY_CONFIG', () => {
     process.env.GITY_CONFIG = path;
     expect(getConfigPath()).toBe(path);
+  });
+
+  it('loads and validates per-repo .gityrc overrides', async () => {
+    expect(await loadRepoConfig(dir)).toEqual({ ignore: [] });
+
+    await writeFile(
+      join(dir, '.gityrc'),
+      JSON.stringify({
+        provider: 'my-claude',
+        model: 'claude-sonnet-4-5',
+        commitStyle: 'freeform',
+        ignore: ['dist/**', '*.snap'],
+        pullStrategy: 'ff-only',
+      }),
+    );
+
+    const rc = await loadRepoConfig(dir);
+    expect(rc).toEqual({
+      provider: 'my-claude',
+      model: 'claude-sonnet-4-5',
+      commitStyle: 'freeform',
+      ignore: ['dist/**', '*.snap'],
+      pullStrategy: 'ff-only',
+    });
+
+    await writeFile(join(dir, '.gityrc'), '{ bad json');
+    await expect(loadRepoConfig(dir)).rejects.toThrow(/not valid JSON/);
+
+    expect(RepoConfigSchema.safeParse({ provider: 'bad name' }).success).toBe(false);
   });
 });
