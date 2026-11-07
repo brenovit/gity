@@ -2,8 +2,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createProgram } from '../src/bin/gity.js';
 import { providerTest } from '../src/commands/provider.js';
-import { addProvider, buildProfile, defaultConfig, saveConfig } from '../src/config.js';
+import { addProvider, buildProfile, defaultConfig, loadConfig, saveConfig } from '../src/config.js';
 
 describe('providerTest command', () => {
   let tmpDir: string;
@@ -78,6 +79,44 @@ describe('providerTest command', () => {
     expect(process.exitCode).toBe(1);
 
     vi.unstubAllGlobals();
+    logSpy.mockRestore();
+  });
+
+  it('parses `gity provider add -t lmstudio --model "..."` without root option collision and defaults name to type', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const program = createProgram();
+    await program.parseAsync([
+      'node',
+      'gity',
+      'provider',
+      'add',
+      '-t',
+      'lmstudio',
+      '--model',
+      'qwen/qwen3.6-35b-a3b',
+    ]);
+
+    const config = await loadConfig();
+    expect(config.providers['lmstudio']).toEqual({
+      type: 'lmstudio',
+      model: 'qwen/qwen3.6-35b-a3b',
+      baseUrl: 'http://localhost:1234/v1',
+    });
+    expect(config.defaultProvider).toBe('lmstudio');
+    logSpy.mockRestore();
+  });
+
+  it('parses `gity provider add <name> -t ollama -m <model>` with an explicit profile name', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const program = createProgram();
+    await program.parseAsync(['node', 'gity', 'provider', 'add', 'my-ollama', '-t', 'ollama', '-m', 'llama3.2']);
+
+    const config = await loadConfig();
+    expect(config.providers['my-ollama']).toEqual({
+      type: 'ollama',
+      model: 'llama3.2',
+      baseUrl: 'http://localhost:11434',
+    });
     logSpy.mockRestore();
   });
 });
