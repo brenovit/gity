@@ -84,7 +84,7 @@ Shows what commits would be created (grouped files and Conventional Commit messa
 | `gity --help` | Show help |
 | `gity setup` | Interactive provider setup wizard |
 | `gity provider list` | List configured providers |
-| `gity provider add <name> -t <type> -m <model>` | Add a profile (`--base-url`, `--api-key-env`, `--default`, `--force`) |
+| `gity provider add [name] -t <type> -m <model>` | Add a profile (`--base-url`, `--api-key-env`, `--default`, `--force`) |
 | `gity provider show <name>` | Show a provider profile |
 | `gity provider remove <name>` | Remove a provider profile |
 | `gity provider use <name>` | Set default provider |

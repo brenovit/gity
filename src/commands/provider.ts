@@ -59,13 +59,14 @@ export interface ProviderAddOptions {
   force?: boolean;
 }
 
-export async function providerAdd(name: string, opts: ProviderAddOptions): Promise<void> {
+export async function providerAdd(name: string | undefined, opts: ProviderAddOptions): Promise<void> {
   const type = parseProviderType(opts.type);
+  const profileName = (name && name.trim().length > 0 ? name : type).trim();
   const profile = buildProfile({ type, model: opts.model, baseUrl: opts.baseUrl, apiKeyEnv: opts.apiKeyEnv });
-  const config = addProvider(await loadConfig(), name, profile, { makeDefault: opts.default, overwrite: opts.force });
+  const config = addProvider(await loadConfig(), profileName, profile, { makeDefault: opts.default, overwrite: opts.force });
   await saveConfig(config);
-  console.log(`Saved provider "${name}" to ${getConfigPath()}`);
-  printProfile(name, profile, config.defaultProvider === name);
+  console.log(`Saved provider "${profileName}" to ${getConfigPath()}`);
+  printProfile(profileName, profile, config.defaultProvider === profileName);
 }
 
 export async function providerRemove(name: string): Promise<void> {
