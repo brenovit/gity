@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { checkCommand, tokenize } from '../src/tools/bash.js';
-import { validateCommitMessage } from '../src/tools/git.js';
+import {
+  executeGitPull,
+  getInProgressGitOp,
+  pullStrategyArgs,
+  validateCommitMessage,
+} from '../src/tools/git.js';
 import { runTool, toToolSpecs } from '../src/tools/index.js';
 import { isInside, isSecretPath, resolveRepoPath, truncate } from '../src/tools/safety.js';
 import type { ToolContext } from '../src/tools/tool.js';
@@ -249,6 +254,116 @@ describe('git tools', () => {
     const tooLong = await runTool('git_commit', { message: `feat: ${'x'.repeat(70)}` }, ctx);
     expect(tooLong.ok).toBe(false);
     expect(tooLong.output).toMatch(/Invalid commit message: .*<= 72 characters/);
+  });
+
+  it('pullStrategyArgs maps strategies to git pull flags', () => {
+    expect(pullStrategyArgs('rebase-autostash')).toEqual(['pull', '--rebase', '--autostash']);
+    expect(pullStrategyArgs('rebase')).toEqual(['pull', '--rebase']);
+    expect(pullStrategyArgs('ff-only')).toEqual(['pull', '--ff-only']);
+    expect(pullStrategyArgs('merge')).toEqual(['pull', '--no-rebase']);
+    expect(pullStrategyArgs('none')).toEqual([]);
+  });
+
+  it('git_pull rebases local commits onto upstream changes (rebase-autostash)', async () => {
+    const remote = join(base, 'remote.git');
+    git(base, 'init', '--bare', '-q', remote);
+    const branch = git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim();
+    git(repo, 'remote', 'add', 'origin', remote);
+    git(repo, 'push', '-u', '-q', 'origin', branch);
+
+    // Push a non-conflicting commit from a second clone
+    const peer = join(base, 'peer');
+    git(base, 'clone', '-q', remote, peer);
+    git(peer, 'config', 'user.email', 'peer@test.com');
+    git(peer, 'config', 'user.name', 'Peer');
+    git(peer, 'config', 'commit.gpgsign', 'false');
+    writeFileSync(join(peer, 'remote-file.txt'), 'from peer\n');
+    git(peer, 'add', 'remote-file.txt');
+    git(peer, 'commit', '-q', '-m', 'feat: add remote file');
+    git(peer, 'push', '-q', 'origin', branch);
+
+    // Create a local commit + an unstaged change (to verify --autostash)
+    writeFileSync(join(repo, 'local-file.txt'), 'from local\n');
+    git(repo, 'add', 'local-file.txt');
+    git(repo, 'commit', '-q', '-m', 'feat: add local file');
+    writeFileSync(join(repo, 'README.md'), '# Hello\nUnstaged work\n');
+
+    const pullRes = await runTool('git_pull', {}, ctx);
+    expect(pullRes.ok).toBe(true);
+
+    // Local commit should now be rebased on top of peer's commit, and unstaged work preserved
+    const log = git(repo, 'log', '--pretty=format:%s', '-n', '3').trim().split('\n');
+    expect(log).toEqual(['feat: add local file', 'feat: add remote file', 'initial']);
+    expect(git(repo, 'status', '--porcelain')).toContain('M README.md');
+  });
+
+  it('git_pull aborts rebase on conflict and leaves repository in a safe state', async () => {
+    const remote = join(base, 'remote.git');
+    git(base, 'init', '--bare', '-q', remote);
+    const branch = git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim();
+    git(repo, 'remote', 'add', 'origin', remote);
+    git(repo, 'push', '-u', '-q', 'origin', branch);
+
+    // Peer modifies README.md and pushes
+    const peer = join(base, 'peer');
+    git(base, 'clone', '-q', remote, peer);
+    git(peer, 'config', 'user.email', 'peer@test.com');
+    git(peer, 'config', 'user.name', 'Peer');
+    git(peer, 'config', 'commit.gpgsign', 'false');
+    writeFileSync(join(peer, 'README.md'), '# Peer conflicting change\n');
+    git(peer, 'add', 'README.md');
+    git(peer, 'commit', '-q', '-m', 'docs: peer update');
+    git(peer, 'push', '-q', 'origin', branch);
+
+    // Local repo also modifies README.md on the same line and commits
+    writeFileSync(join(repo, 'README.md'), '# Local conflicting change\n');
+    git(repo, 'add', 'README.md');
+    git(repo, 'commit', '-q', '-m', 'docs: local update');
+    const headBeforePull = git(repo, 'rev-parse', 'HEAD').trim();
+
+    const outcome = await executeGitPull(ctx, 'rebase-autostash');
+    expect(outcome.ok).toBe(false);
+    expect(outcome.conflict).toBe(true);
+    expect(outcome.conflictedFiles).toContain('README.md');
+    expect(outcome.output).toMatch(/Pull conflict/);
+    expect(outcome.output).toMatch(/safe state/);
+
+    // Verify repo is NOT left mid-rebase and local commit + branch are intact
+    expect(await getInProgressGitOp(ctx)).toBeNull();
+    expect(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe(branch);
+    expect(git(repo, 'rev-parse', 'HEAD').trim()).toBe(headBeforePull);
+    expect(git(repo, 'status', '--porcelain').trim()).toBe('');
+  });
+
+  it('git_pull with merge strategy aborts merge on conflict and leaves repo in a safe state', async () => {
+    const remote = join(base, 'remote.git');
+    git(base, 'init', '--bare', '-q', remote);
+    const branch = git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim();
+    git(repo, 'remote', 'add', 'origin', remote);
+    git(repo, 'push', '-u', '-q', 'origin', branch);
+
+    const peer = join(base, 'peer');
+    git(base, 'clone', '-q', remote, peer);
+    git(peer, 'config', 'user.email', 'peer@test.com');
+    git(peer, 'config', 'user.name', 'Peer');
+    git(peer, 'config', 'commit.gpgsign', 'false');
+    writeFileSync(join(peer, 'README.md'), '# Peer merge conflict\n');
+    git(peer, 'add', 'README.md');
+    git(peer, 'commit', '-q', '-m', 'docs: peer merge update');
+    git(peer, 'push', '-q', 'origin', branch);
+
+    writeFileSync(join(repo, 'README.md'), '# Local merge conflict\n');
+    git(repo, 'add', 'README.md');
+    git(repo, 'commit', '-q', '-m', 'docs: local merge update');
+    const headBeforePull = git(repo, 'rev-parse', 'HEAD').trim();
+
+    const outcome = await executeGitPull(ctx, 'merge');
+    expect(outcome.ok).toBe(false);
+    expect(outcome.conflict).toBe(true);
+    expect(outcome.conflictedFiles).toContain('README.md');
+    expect(await getInProgressGitOp(ctx)).toBeNull();
+    expect(git(repo, 'rev-parse', 'HEAD').trim()).toBe(headBeforePull);
+    expect(git(repo, 'status', '--porcelain').trim()).toBe('');
   });
 });
 

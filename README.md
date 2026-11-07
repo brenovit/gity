@@ -54,14 +54,14 @@ Shows repo name, branch, and changed/untracked file counts.
 gity run
 ```
 
-The agent inspects your changes, prints a proposed commit plan, and prompts for confirmation (`y` to commit, `n` to abort, or `edit` to modify the plan/messages). Once confirmed, it stages specific file paths (`git_add`), creates each commit in Conventional Commits format (`<= 72` char imperative subject), and verifies the repository with `git_status` after each commit.
+The agent inspects your changes, prints a proposed commit plan, and prompts for confirmation (`y` to commit, `n` to abort, or `edit` to modify the plan/messages). Once confirmed, it stages specific file paths (`git_add`), creates each commit in Conventional Commits format (`<= 72` char imperative subject), verifies the repository with `git_status` after each commit, and pulls from the remote (`git pull --rebase --autostash` by default; if a conflict occurs, it aborts the in-progress rebase/merge and leaves the repo in a safe state with your local commits intact).
 
-Skip confirmation and commit immediately with `--yes`:
+Skip confirmation and commit immediately with `--yes`, or skip pulling with `--no-pull`:
 
 ```bash
 gity run --yes
-# or
-gity --yes
+gity run --no-pull
+gity run --pull-strategy ff-only
 ```
 
 ### 4. Dry-run (no changes)
@@ -95,6 +95,7 @@ Shows what commits would be created (grouped files and Conventional Commit messa
 | `gity run --dry-run` | Preview commits without changes |
 | `gity run --yes` | Skip confirmation prompts |
 | `gity run --no-pull` | Skip pulling after commits |
+| `gity run --pull-strategy <strategy>` | Pull strategy (`rebase-autostash`, `rebase`, `ff-only`, `merge`, `none`) |
 | `gity run --provider <name>` | Override provider for this run |
 | `gity run --model <name>` | Override model for this run |
 | `gity run --max-iterations <n>` | Cap agent tool-calling turns (default 15) |

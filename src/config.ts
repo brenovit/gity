@@ -86,11 +86,28 @@ export const ProviderNameSchema = z
   .string()
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, 'use letters, digits, ".", "_" or "-" (max 64 chars)');
 
+/** Supported git pull strategies after committing. */
+export const PullStrategySchema = z.enum(['rebase-autostash', 'rebase', 'ff-only', 'merge', 'none']);
+export type PullStrategy = z.infer<typeof PullStrategySchema>;
+export const DEFAULT_PULL_STRATEGY: PullStrategy = 'rebase-autostash';
+
+export function parsePullStrategy(value: string): PullStrategy {
+  const result = PullStrategySchema.safeParse(value.trim());
+  if (!result.success) {
+    throw new ConfigError(
+      `Invalid pull strategy "${value}". Must be one of: ${PullStrategySchema.options.join(', ')}`,
+    );
+  }
+  return result.data;
+}
+
 /** Full config schema. */
 export const ConfigSchema = z
   .object({
     /** Name of the default provider profile (key into `providers`). */
     defaultProvider: z.string().optional(),
+    /** Pull strategy used after creating commits (defaults to `rebase-autostash`). */
+    pullStrategy: PullStrategySchema.optional(),
     /** Named provider profiles. */
     providers: z.record(ProviderNameSchema, ProviderProfileSchema).default({}),
   })

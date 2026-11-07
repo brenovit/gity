@@ -12,6 +12,7 @@ import {
   getConfigPath,
   loadConfig,
   maskSecret,
+  parsePullStrategy,
   removeProvider,
   resolveProvider,
   saveConfig,
@@ -42,6 +43,19 @@ describe('config schema', () => {
 
   it('rejects a default that points to a missing provider', () => {
     expect(ConfigSchema.safeParse({ defaultProvider: 'nope', providers: {} }).success).toBe(false);
+  });
+
+  it('validates pullStrategy in config and parsePullStrategy', () => {
+    expect(ConfigSchema.parse({ pullStrategy: 'rebase-autostash' })).toEqual({
+      pullStrategy: 'rebase-autostash',
+      providers: {},
+    });
+    expect(parsePullStrategy('rebase')).toBe('rebase');
+    expect(parsePullStrategy('ff-only')).toBe('ff-only');
+    expect(parsePullStrategy('merge')).toBe('merge');
+    expect(parsePullStrategy('none')).toBe('none');
+    expect(() => parsePullStrategy('force-push')).toThrow(ConfigError);
+    expect(ConfigSchema.safeParse({ pullStrategy: 'invalid' }).success).toBe(false);
   });
 });
 

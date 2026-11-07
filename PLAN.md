@@ -134,7 +134,7 @@ interface Provider {
 - Conventional Commits format, imperative subject <= 72 chars
 - Verify with `git_status` after each commit
 
-### Stage 7: Pull
+### Stage 7: Pull ✅
 - After commits, run `git pull --rebase --autostash` (configurable strategy)
 - Flag `--no-pull` to skip
 - On conflicts: stop, report clearly, leave repo in safe state

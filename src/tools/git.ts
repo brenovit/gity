@@ -1,5 +1,7 @@
 import { lstat } from 'node:fs/promises';
+import { isAbsolute, join } from 'node:path';
 import { z } from 'zod';
+import { DEFAULT_PULL_STRATEGY, PullStrategySchema, type PullStrategy } from '../config.js';
 import { runCommand, type RunResult } from '../util/spawn.js';
 import { isSecretPath, resolveRepoPath, SECRET_EXCLUDE_PATHSPECS, ToolSafetyError } from './safety.js';
 import { defineTool, type Tool, type ToolContext } from './tool.js';
@@ -254,15 +256,172 @@ export const gitCommitTool = defineTool({
   },
 });
 
+export interface GitPullOutcome {
+  ok: boolean;
+  skipped: boolean;
+  conflict: boolean;
+  conflictedFiles: string[];
+  strategy: PullStrategy;
+  output: string;
+}
+
+/** Map a pull strategy to its `git pull` argument list. */
+export function pullStrategyArgs(strategy: PullStrategy): string[] {
+  switch (strategy) {
+    case 'rebase-autostash':
+      return ['pull', '--rebase', '--autostash'];
+    case 'rebase':
+      return ['pull', '--rebase'];
+    case 'ff-only':
+      return ['pull', '--ff-only'];
+    case 'merge':
+      return ['pull', '--no-rebase'];
+    case 'none':
+      return [];
+  }
+}
+
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await lstat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function getGitDir(ctx: ToolContext): Promise<string> {
+  const r = await runGit(ctx, ['rev-parse', '--git-dir']);
+  const dir = r.code === 0 && r.stdout.trim().length > 0 ? r.stdout.trim() : '.git';
+  return isAbsolute(dir) ? dir : join(ctx.repoRoot, dir);
+}
+
+/** Check whether a rebase or merge operation is currently in progress in the repository. */
+export async function getInProgressGitOp(ctx: ToolContext): Promise<'rebase' | 'merge' | null> {
+  const gitDir = await getGitDir(ctx);
+  if ((await pathExists(join(gitDir, 'rebase-merge'))) || (await pathExists(join(gitDir, 'rebase-apply')))) {
+    return 'rebase';
+  }
+  if (await pathExists(join(gitDir, 'MERGE_HEAD'))) {
+    return 'merge';
+  }
+  return null;
+}
+
+async function getConflictedFiles(ctx: ToolContext): Promise<string[]> {
+  const r = await runGit(ctx, ['diff', '--name-only', '--diff-filter=U']);
+  if (r.code !== 0) return [];
+  return r.stdout
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/**
+ * Execute `git pull` with the configured strategy.
+ * If a conflict occurs, automatically abort any in-progress rebase/merge so the repository is left in a safe state.
+ */
+export async function executeGitPull(
+  ctx: ToolContext,
+  strategy: PullStrategy = DEFAULT_PULL_STRATEGY,
+): Promise<GitPullOutcome> {
+  if (strategy === 'none') {
+    return {
+      ok: true,
+      skipped: true,
+      conflict: false,
+      conflictedFiles: [],
+      strategy,
+      output: 'Skipped git pull (strategy: none).',
+    };
+  }
+
+  const existingOp = await getInProgressGitOp(ctx);
+  if (existingOp) {
+    return {
+      ok: false,
+      skipped: false,
+      conflict: true,
+      conflictedFiles: await getConflictedFiles(ctx),
+      strategy,
+      output: `Cannot pull: a git ${existingOp} is already in progress. Resolve or abort it first.`,
+    };
+  }
+
+  const gitArgs = pullStrategyArgs(strategy);
+  const r = await runGit(ctx, gitArgs, 120_000);
+  const rawOutput = combined(r);
+
+  if (r.code === 0) {
+    return {
+      ok: true,
+      skipped: false,
+      conflict: false,
+      conflictedFiles: [],
+      strategy,
+      output: rawOutput || 'Pulled successfully.',
+    };
+  }
+
+  const inProgressOp = await getInProgressGitOp(ctx);
+  const unmerged = await getConflictedFiles(ctx);
+  const conflictFromOutput: string[] = [];
+  const conflictRegex = /CONFLICT\b[^\r\n]*?\bin\s+([^\r\n]+)/gi;
+  for (const match of rawOutput.matchAll(conflictRegex)) {
+    const file = match[1]?.trim();
+    if (file) conflictFromOutput.push(file);
+  }
+  const conflictedFiles = Array.from(new Set([...unmerged, ...conflictFromOutput]));
+  const isConflict =
+    inProgressOp !== null ||
+    conflictedFiles.length > 0 ||
+    /CONFLICT|could not apply|Automatic merge failed|Resolve all conflicts/i.test(rawOutput);
+
+  if (inProgressOp === 'rebase') {
+    await runGit(ctx, ['rebase', '--abort']);
+  } else if (inProgressOp === 'merge') {
+    await runGit(ctx, ['merge', '--abort']);
+  }
+
+  if (isConflict) {
+    const filesDetail =
+      conflictedFiles.length > 0 ? ` Conflicting file(s): ${conflictedFiles.join(', ')}.` : '';
+    const abortDetail = inProgressOp
+      ? ` Aborted in-progress ${inProgressOp} to leave the repository in a clean, safe state with your local commits intact.`
+      : ' Repository left in a safe state with your local commits intact.';
+    return {
+      ok: false,
+      skipped: false,
+      conflict: true,
+      conflictedFiles,
+      strategy,
+      output: `Pull conflict during \`git ${gitArgs.join(' ')}\`.${filesDetail}${abortDetail}${rawOutput ? `\n${rawOutput}` : ''}`,
+    };
+  }
+
+  return {
+    ok: false,
+    skipped: false,
+    conflict: false,
+    conflictedFiles: [],
+    strategy,
+    output: rawOutput || `git pull exited with code ${r.code}`,
+  };
+}
+
 export const gitPullTool = defineTool({
   name: 'git_pull',
-  description: 'Pull from the upstream remote using `git pull --rebase --autostash`.',
-  schema: z.object({}),
+  description:
+    'Pull from the upstream remote (defaults to `git pull --rebase --autostash`). On conflicts, aborts any in-progress rebase/merge to leave the repository in a safe state.',
+  schema: z.object({
+    strategy: PullStrategySchema.default(DEFAULT_PULL_STRATEGY).describe(
+      'Pull strategy: rebase-autostash (default), rebase, ff-only, merge, or none',
+    ),
+  }),
   mutating: true,
-  async run(_args, ctx) {
-    const r = await runGit(ctx, ['pull', '--rebase', '--autostash'], 120_000);
-    if (r.code !== 0) return failure(r);
-    return { output: combined(r) || 'Pulled successfully.' };
+  async run(args, ctx) {
+    const res = await executeGitPull(ctx, args.strategy);
+    return { ok: res.ok, output: res.output };
   },
 });
 

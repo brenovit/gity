@@ -6,9 +6,16 @@ import {
   COMMIT_SYSTEM_PROMPT,
   READ_ONLY_SYSTEM_PROMPT,
 } from '../agent/prompt.js';
-import { loadConfig, resolveProvider } from '../config.js';
+import {
+  DEFAULT_PULL_STRATEGY,
+  loadConfig,
+  parsePullStrategy,
+  resolveProvider,
+  type Config,
+  type PullStrategy,
+} from '../config.js';
 import { createProvider, type Provider } from '../providers/index.js';
-import { runGit } from '../tools/git.js';
+import { executeGitPull, runGit } from '../tools/git.js';
 import { COMMIT_TOOLS, READ_ONLY_TOOLS, runTool, type ToolResult } from '../tools/index.js';
 import { isSecretPath } from '../tools/safety.js';
 import type { ToolCall } from '../types.js';
@@ -24,6 +31,12 @@ export type ConfirmPlanFn = (plan: string) => Promise<PlanDecision> | PlanDecisi
 export interface RunOptions {
   dryRun?: boolean;
   yes?: boolean;
+  /** Commander sets `pull: false` when `--no-pull` is passed (defaults to `true`). */
+  pull?: boolean;
+  /** Explicit flag to skip pulling after commits. */
+  noPull?: boolean;
+  /** Pull strategy override (`rebase-autostash`, `rebase`, `ff-only`, `merge`, `none`). */
+  pullStrategy?: PullStrategy | string;
   provider?: string;
   model?: string;
   maxIterations?: number | string;
@@ -60,6 +73,12 @@ async function hasCommittableChanges(repoRoot: string): Promise<boolean> {
     const path = line.slice(3).split(' -> ').pop() ?? '';
     return path.length > 0 && !isSecretPath(path);
   });
+}
+
+/** Check if the repository has at least one configured git remote. */
+async function hasRemote(repoRoot: string): Promise<boolean> {
+  const r = await runGit({ repoRoot }, ['remote']);
+  return r.code === 0 && r.stdout.trim().length > 0;
 }
 
 export interface PromptDriver {
@@ -126,13 +145,21 @@ export async function runAgent(opts: RunOptions = {}): Promise<AgentLoopResult |
     return null;
   }
 
+  let config: Config | undefined;
   let provider = opts.providerInstance;
   if (!provider) {
-    const config = await loadConfig(opts.configPath);
+    config = await loadConfig(opts.configPath);
     const resolved = resolveProvider(config, opts.provider);
     const profile = opts.model ? { ...resolved.profile, model: opts.model.trim() } : resolved.profile;
     provider = createProvider(profile);
+  } else if (opts.configPath) {
+    config = await loadConfig(opts.configPath);
   }
+
+  const pullStrategy: PullStrategy = opts.pullStrategy
+    ? parsePullStrategy(String(opts.pullStrategy))
+    : (config?.pullStrategy ?? DEFAULT_PULL_STRATEGY);
+  const shouldPull = opts.noPull !== true && opts.pull !== false && pullStrategy !== 'none';
 
   const logToolCall = (call: ToolCall, iteration: number): void => {
     const argText = formatToolArgs(call.args);
@@ -263,7 +290,53 @@ export async function runAgent(opts: RunOptions = {}): Promise<AgentLoopResult |
     );
     if (commitResult.stopReason === 'error') {
       process.exitCode = 1;
+      return {
+        text: commitResult.text || planResult.text,
+        messages: commitResult.messages,
+        toolTraces: [...planResult.toolTraces, ...commitResult.toolTraces],
+        iterations: planResult.iterations + commitResult.iterations,
+        stopReason: commitResult.stopReason,
+      };
     }
+  }
+
+  if (shouldPull && lastCommitIdx !== -1 && (await hasRemote(repoRoot))) {
+    console.log(`\nPulling from remote (strategy: ${pullStrategy})...`);
+    const pullCall: ToolCall = {
+      id: 'post_commit_pull',
+      name: 'git_pull',
+      args: { strategy: pullStrategy },
+    };
+    logToolCall(pullCall, commitResult.iterations);
+    const pullStart = Date.now();
+    const pullOutcome = await executeGitPull({ repoRoot }, pullStrategy);
+    const pullDuration = Date.now() - pullStart;
+    const pullToolResult: ToolResult = {
+      ok: pullOutcome.ok,
+      output: pullOutcome.output,
+      truncated: false,
+    };
+    logToolResult(pullCall, pullToolResult, pullDuration);
+    commitResult.toolTraces.push({
+      iteration: commitResult.iterations,
+      call: pullCall,
+      result: pullToolResult,
+      durationMs: pullDuration,
+    });
+
+    if (!pullOutcome.ok) {
+      console.error(`\nError: ${pullOutcome.output}`);
+      process.exitCode = 1;
+      return {
+        text: commitResult.text || planResult.text,
+        messages: commitResult.messages,
+        toolTraces: [...planResult.toolTraces, ...commitResult.toolTraces],
+        iterations: planResult.iterations + commitResult.iterations,
+        stopReason: 'error',
+      };
+    }
+
+    console.log(pullOutcome.output);
   }
 
   return {

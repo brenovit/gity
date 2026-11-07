@@ -22,6 +22,8 @@ program
   .version('0.1.0')
   .option('-d, --dry-run', 'Analyze changes and print a commit plan without touching git')
   .option('-y, --yes', 'Skip confirmation prompts and commit immediately')
+  .option('--no-pull', 'Skip pulling from the remote after committing')
+  .option('--pull-strategy <strategy>', 'Pull strategy: rebase-autostash | rebase | ff-only | merge | none')
   .option('-p, --provider <name>', 'Provider profile to use for this run')
   .option('-m, --model <model>', 'Model override for this run')
   .option('--max-iterations <n>', 'Maximum agent tool-calling iterations (default 15)')
@@ -73,14 +75,25 @@ function handle<A extends unknown[]>(fn: (...args: A) => Promise<void> | void): 
 // gity run — run the commit agent
 program
   .command('run')
-  .description('Analyze uncommitted changes, confirm plan, and create commits')
+  .description('Analyze uncommitted changes, confirm plan, create commits, and pull from remote')
   .option('-d, --dry-run', 'Analyze changes and print a commit plan without touching git')
   .option('-y, --yes', 'Skip confirmation prompts and commit immediately')
+  .option('--no-pull', 'Skip pulling from the remote after committing')
+  .option('--pull-strategy <strategy>', 'Pull strategy: rebase-autostash | rebase | ff-only | merge | none')
   .option('-p, --provider <name>', 'Provider profile to use for this run')
   .option('-m, --model <model>', 'Model override for this run')
   .option('--max-iterations <n>', 'Maximum agent tool-calling iterations (default 15)')
   .option('-v, --verbose', 'Show detailed tool call timing and status')
-  .action(handle((opts: RunOptions) => runAgent({ ...program.opts<RunOptions>(), ...opts }).then(() => undefined)));
+  .action(
+    handle((opts: RunOptions) => {
+      const rootOpts = program.opts<RunOptions>();
+      return runAgent({
+        ...rootOpts,
+        ...opts,
+        pull: rootOpts.pull !== false && opts.pull !== false,
+      }).then(() => undefined);
+    }),
+  );
 
 // gity setup — interactive provider setup wizard
 program

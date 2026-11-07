@@ -46,6 +46,7 @@ function scriptedProvider(steps: Array<(input: ChatInput, turn: number) => ChatR
 let repo: string;
 
 beforeEach(() => {
+  process.exitCode = undefined;
   repo = realpathSync(mkdtempSync(join(tmpdir(), 'gity-agent-')));
   git(repo, 'init', '-q');
   git(repo, 'config', 'user.email', 'test@test.com');
@@ -561,6 +562,202 @@ describe('runAgent command', () => {
       action: 'edit',
       plan: 'feat: updated plan',
     });
+  });
+
+  it('pulls from remote after commits using git pull --rebase --autostash', async () => {
+    const remoteRoot = realpathSync(mkdtempSync(join(tmpdir(), 'gity-remote-')));
+    try {
+      const bareRemote = join(remoteRoot, 'origin.git');
+      git(remoteRoot, 'init', '--bare', '-q', bareRemote);
+      const branch = git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim();
+      git(repo, 'remote', 'add', 'origin', bareRemote);
+      git(repo, 'push', '-u', '-q', 'origin', branch);
+
+      // Push an upstream commit from a peer clone
+      const peer = join(remoteRoot, 'peer');
+      git(remoteRoot, 'clone', '-q', bareRemote, peer);
+      git(peer, 'config', 'user.email', 'peer@test.com');
+      git(peer, 'config', 'user.name', 'Peer');
+      git(peer, 'config', 'commit.gpgsign', 'false');
+      writeFileSync(join(peer, 'upstream.txt'), 'upstream content\n');
+      git(peer, 'add', 'upstream.txt');
+      git(peer, 'commit', '-q', '-m', 'feat: add upstream file');
+      git(peer, 'push', '-q', 'origin', branch);
+
+      // Create a local uncommitted file
+      writeFileSync(join(repo, 'local.ts'), 'export const local = 1;\n');
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      const { provider } = scriptedProvider([
+        () => ({
+          text: 'Plan: feat: add local module (local.ts)',
+          stopReason: 'end',
+          toolCalls: [],
+        }),
+        () => ({
+          text: '',
+          stopReason: 'tool_use',
+          toolCalls: [
+            { id: 'c1', name: 'git_add', args: { paths: ['local.ts'] } },
+            { id: 'c2', name: 'git_commit', args: { message: 'feat: add local module' } },
+            { id: 'c3', name: 'git_status', args: {} },
+          ],
+        }),
+        () => ({
+          text: 'Committed local.ts.',
+          stopReason: 'end',
+          toolCalls: [],
+        }),
+      ]);
+
+      const res = await runAgent({
+        repoRoot: repo,
+        providerInstance: provider,
+        yes: true,
+      });
+
+      expect(res?.stopReason).toBe('completed');
+      expect(res?.toolTraces.map((t) => t.call.name)).toEqual([
+        'git_add',
+        'git_commit',
+        'git_status',
+        'git_pull',
+      ]);
+
+      const commits = git(repo, 'log', '--pretty=format:%s', '-n', '3').trim().split('\n');
+      expect(commits).toEqual(['feat: add local module', 'feat: add upstream file', 'chore: initial commit']);
+    } finally {
+      rmSync(remoteRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('skips pulling when --no-pull (pull: false) is passed', async () => {
+    const remoteRoot = realpathSync(mkdtempSync(join(tmpdir(), 'gity-remote-')));
+    try {
+      const bareRemote = join(remoteRoot, 'origin.git');
+      git(remoteRoot, 'init', '--bare', '-q', bareRemote);
+      const branch = git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim();
+      git(repo, 'remote', 'add', 'origin', bareRemote);
+      git(repo, 'push', '-u', '-q', 'origin', branch);
+
+      const peer = join(remoteRoot, 'peer');
+      git(remoteRoot, 'clone', '-q', bareRemote, peer);
+      git(peer, 'config', 'user.email', 'peer@test.com');
+      git(peer, 'config', 'user.name', 'Peer');
+      git(peer, 'config', 'commit.gpgsign', 'false');
+      writeFileSync(join(peer, 'upstream.txt'), 'upstream content\n');
+      git(peer, 'add', 'upstream.txt');
+      git(peer, 'commit', '-q', '-m', 'feat: add upstream file');
+      git(peer, 'push', '-q', 'origin', branch);
+
+      writeFileSync(join(repo, 'local.ts'), 'export const local = 1;\n');
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      const { provider } = scriptedProvider([
+        () => ({
+          text: 'Plan: feat: add local module (local.ts)',
+          stopReason: 'end',
+          toolCalls: [],
+        }),
+        () => ({
+          text: '',
+          stopReason: 'tool_use',
+          toolCalls: [
+            { id: 'c1', name: 'git_add', args: { paths: ['local.ts'] } },
+            { id: 'c2', name: 'git_commit', args: { message: 'feat: add local module' } },
+            { id: 'c3', name: 'git_status', args: {} },
+          ],
+        }),
+        () => ({
+          text: 'Committed local.ts.',
+          stopReason: 'end',
+          toolCalls: [],
+        }),
+      ]);
+
+      const res = await runAgent({
+        repoRoot: repo,
+        providerInstance: provider,
+        yes: true,
+        pull: false,
+      });
+
+      expect(res?.stopReason).toBe('completed');
+      expect(res?.toolTraces.map((t) => t.call.name)).not.toContain('git_pull');
+      const commits = git(repo, 'log', '--pretty=format:%s', '-n', '2').trim().split('\n');
+      expect(commits).toEqual(['feat: add local module', 'chore: initial commit']);
+    } finally {
+      rmSync(remoteRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('on pull conflict: stops, reports clearly, and leaves repo in a safe state with local commits intact', async () => {
+    const remoteRoot = realpathSync(mkdtempSync(join(tmpdir(), 'gity-remote-')));
+    try {
+      const bareRemote = join(remoteRoot, 'origin.git');
+      git(remoteRoot, 'init', '--bare', '-q', bareRemote);
+      const branch = git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim();
+      git(repo, 'remote', 'add', 'origin', bareRemote);
+      git(repo, 'push', '-u', '-q', 'origin', branch);
+
+      // Peer modifies README.md and pushes
+      const peer = join(remoteRoot, 'peer');
+      git(remoteRoot, 'clone', '-q', bareRemote, peer);
+      git(peer, 'config', 'user.email', 'peer@test.com');
+      git(peer, 'config', 'user.name', 'Peer');
+      git(peer, 'config', 'commit.gpgsign', 'false');
+      writeFileSync(join(peer, 'README.md'), '# Conflicting upstream change\n');
+      git(peer, 'add', 'README.md');
+      git(peer, 'commit', '-q', '-m', 'docs: upstream update');
+      git(peer, 'push', '-q', 'origin', branch);
+
+      // Local modifies README.md on the same line
+      writeFileSync(join(repo, 'README.md'), '# Conflicting local change\n');
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const { provider } = scriptedProvider([
+        () => ({
+          text: 'Plan: docs: update README (README.md)',
+          stopReason: 'end',
+          toolCalls: [],
+        }),
+        () => ({
+          text: '',
+          stopReason: 'tool_use',
+          toolCalls: [
+            { id: 'c1', name: 'git_add', args: { paths: ['README.md'] } },
+            { id: 'c2', name: 'git_commit', args: { message: 'docs: update README' } },
+            { id: 'c3', name: 'git_status', args: {} },
+          ],
+        }),
+        () => ({
+          text: 'Committed README.md.',
+          stopReason: 'end',
+          toolCalls: [],
+        }),
+      ]);
+
+      const res = await runAgent({
+        repoRoot: repo,
+        providerInstance: provider,
+        yes: true,
+      });
+
+      expect(res?.stopReason).toBe('error');
+      expect(process.exitCode).toBe(1);
+      const errOutput = errSpy.mock.calls.flat().join('\n');
+      expect(errOutput).toMatch(/Pull conflict/);
+      expect(errOutput).toContain('README.md');
+      expect(errOutput).toMatch(/safe state/);
+
+      // Repo is clean, on its branch, not stuck mid-rebase, with the local commit preserved
+      expect(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe(branch);
+      expect(git(repo, 'status', '--porcelain').trim()).toBe('');
+      expect(git(repo, 'log', '-1', '--pretty=format:%s').trim()).toBe('docs: update README');
+    } finally {
+      rmSync(remoteRoot, { recursive: true, force: true });
+    }
   });
 });
 
